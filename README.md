@@ -1,21 +1,32 @@
-# AccessDB parser
+# AccessDB Browser Parser
 
 ## Description
 
-A pure javascript Microsoft AccessDB files (.mdb, .accdb) parser.
+This is a fork of the pure javascript Microsoft AccessDB files (.mdb, .accdb) parser `accessdb-parser`, adapted to work in modern web browsers.
 
-## Use
+This version removes Node.js dependencies like `Buffer` and uses `Uint8Array` and other Web APIs instead, making it suitable for client-side applications.
 
-```js
-const { AccessParser } = require("accessdb-parser");
+## Usage
 
-// Load your access file in a node buffer
+```javascript
+import { AccessParser } from "accessdb-parser";
 
-const db = new AccessParser(myFileBuffer);
+async function loadAndParseDB() {
+  const response = await fetch("path/to/your/database.mdb");
+  const arrayBuffer = await response.arrayBuffer();
+  const dbData = new Uint8Array(arrayBuffer);
 
-const tables = db.getTables(); // -> ["tableName1", "tableName2"]
+  const db = new AccessParser(dbData);
 
-const table = db.parseTable("tableName1"); // -> [{data: {name: "John", age: 23}, rowNumber: 1},{data: {name: "Bill", age: 56}, rowNumber: 2}]
+  const tables = db.getTables(); // -> ["tableName1", "tableName2"]
+  console.log("Tables:", tables);
+
+  const table = db.parseTable("tableName1");
+  console.log("Table Data:", table);
+  // -> [{data: {name: "John", age: 23}, rowNumber: 1},{data: {name: "Bill", age: 56}, rowNumber: 2}]
+}
+
+loadAndParseDB();
 ```
 
 ## TypeScript
@@ -28,5 +39,6 @@ This project has types declaration.
 
 ## Special thanks
 
+- The original [accessdb-parser](https://github.com/quentinjanuel/accessdb-parser)
 - https://github.com/ClarotyICS/access_parser
 - https://github.com/brianb/mdbtools
