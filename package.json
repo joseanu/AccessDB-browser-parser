@@ -19,9 +19,9 @@
   "author": "Quentin Januel",
   "license": "MIT",
   "dependencies": {
-    "binary-parser": "^1.6.2",
+    "binary-parser": "^2.2.1",
     "text-decoding": "^1.0.0",
-    "uuid": "^8.3.0"
+    "uuid": "^13.0.0"
   },
   "devDependencies": {
     "@types/node": "^14.6.0",

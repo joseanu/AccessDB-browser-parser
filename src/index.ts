@@ -1,4 +1,4 @@
-import { categorizePages, DataType, parseType } from './utils';
+import { categorizePages, DataType, parseType } from "./utils";
 import {
   ACCESSHEADER,
   TDEF_HEADER,
@@ -7,8 +7,8 @@ import {
   parseTableHead,
   parseTableData,
   parseRelativeObjectMetadataStruct,
-} from './parsing-primitives';
-import { Dico } from './types';
+} from "./parsing-primitives";
+import { Dico } from "./types";
 
 const PAGE_SIZE_V3 = 0x800;
 const PAGE_SIZE_V4 = 0x1000;
@@ -30,12 +30,10 @@ const NEW_VERSIONS = [VERSION_4, VERSION_5, VERSION_2010];
 const SYSTEM_TABLE_FLAGS = [-0x80000000, -0x00000002, 0x80000000, 0x00000002];
 
 class TableObject {
-  public value: Buffer;
-  // private offset: number;
-  public linkedPages: Array<Buffer> = [];
-  public constructor(_offset: number, value: Buffer) {
+  public value: Uint8Array;
+  public linkedPages: Array<Uint8Array> = [];
+  public constructor(_offset: number, value: Uint8Array) {
     this.value = value;
-    // this.offset = offset;
     this.linkedPages = [];
   }
 }
@@ -50,18 +48,17 @@ type Line = {
 type Table = Line[];
 
 export class AccessParser {
-  private dbData: Buffer;
-  private tableDefs: Dico<Buffer>;
-  private dataPages: Dico<Buffer>;
-  // private allPages: Dico<Buffer>;
+  private dbData: Uint8Array;
+  private tableDefs: Dico<Uint8Array>;
+  private dataPages: Dico<Uint8Array>;
   private tablesWithData: Dico<TableObject>;
   private version = ALL_VERSIONS.VERSION_3;
   private pageSize = PAGE_SIZE_V3;
   private catalog: Dico<number>;
-  public constructor(dbData: Buffer) {
+  public constructor(dbData: Uint8Array) {
     this.dbData = dbData;
     this.parseFileHeader();
-    [this.tableDefs, this.dataPages /*this.allPages*/] = categorizePages(
+    [this.tableDefs, this.dataPages] = categorizePages(
       this.dbData,
       this.pageSize,
     );
@@ -74,7 +71,7 @@ export class AccessParser {
       head = ACCESSHEADER.parse(this.dbData);
     } catch {
       throw new Error(
-        'Failed to parse DB file header. Check it is a valid file header',
+        "Failed to parse DB file header. Check it is a valid file header",
       );
     }
     const version = head.jetVersion;
@@ -130,26 +127,23 @@ export class AccessParser {
     const catalog = accessTable.parse();
     const tablesMapping: Dico<number> = {};
     let i = -1;
-    const names: Array<string> = catalog['Name'] as any;
-    const types: Array<number> = catalog['Type'] as any;
-    const flags: Array<number> = catalog['Flags'] as any;
-    const ids: Array<number> = catalog['Id'] as any;
+    const names: Array<string> = catalog["Name"] as any;
+    const types: Array<number> = catalog["Type"] as any;
+    const flags: Array<number> = catalog["Flags"] as any;
+    const ids: Array<number> = catalog["Id"] as any;
     if (
       names === undefined ||
       types === undefined ||
       flags === undefined ||
       ids === undefined
     )
-      throw new Error('The catalog is missing required fields');
+      throw new Error("The catalog is missing required fields");
     for (const tableName of names) {
-      if (typeof tableName !== 'string') continue;
+      if (typeof tableName !== "string") continue;
       i += 1;
       const tableType = 1;
       if (types[i] === tableType) {
         if (!SYSTEM_TABLE_FLAGS.includes(flags[i]) && flags[i] === 0) {
-          // TODO: CHECK IF 0 IS THE RIGHT FLAG TO SET
-          // console.log(tableName);
-          // console.log(flags[i]);
           tablesMapping[tableName] = ids[i];
         }
       }
@@ -169,8 +163,7 @@ export class AccessParser {
           `Could not find table ${tableName} offset ${tableOffset}`,
         );
       } else {
-        throw new Error('Empty table');
-        // table = new TableObject(tableOffset, tableDef);
+        throw new Error("Empty table");
       }
     }
     const accessTable = new AccessTable(
@@ -208,7 +201,7 @@ export class AccessParser {
 }
 
 type PropType<TObj, TProp extends keyof TObj> = TObj[TProp];
-type Column = PropType<ReturnType<typeof parseTableData>, 'column'>[0] & {
+type Column = PropType<ReturnType<typeof parseTableData>, "column">[0] & {
   colNameStr: string;
 };
 type TableHeader = ReturnType<typeof parseTableHead>;
@@ -216,18 +209,18 @@ type TableHeader = ReturnType<typeof parseTableHead>;
 class AccessTable {
   private version: ALL_VERSIONS;
   private pageSize: number;
-  private dataPages: Dico<Buffer>;
-  private tableDefs: Dico<Buffer>;
+  private dataPages: Dico<Uint8Array>;
+  private tableDefs: Dico<Uint8Array>;
   private table: TableObject;
-  private parsedTable: Dico<Array<string | number | boolean>>;
+  private parsedTable: Dico<Array<string | number | boolean | null>>;
   private columns: Dico<Column>;
   private tableHeader: TableHeader;
   public constructor(
     table: TableObject,
     version: ALL_VERSIONS,
     pageSize: number,
-    dataPages: Dico<Buffer>,
-    tableDefs: Dico<Buffer>,
+    dataPages: Dico<Uint8Array>,
+    tableDefs: Dico<Uint8Array>,
   ) {
     this.version = version;
     this.pageSize = pageSize;
@@ -239,15 +232,15 @@ class AccessTable {
   }
   private getTableColumns(): [Dico<Column>, TableHeader] {
     let tableHeader: TableHeader;
-    let colNames: PropType<ReturnType<typeof parseTableData>, 'columnNames'>;
+    let colNames: PropType<ReturnType<typeof parseTableData>, "columnNames">;
     let columns: Array<Column>;
     try {
       tableHeader = parseTableHead(this.table.value, this.version);
       let mergedData = this.table.value.slice(tableHeader.tDefHeaderEnd);
       if (tableHeader.TDEF_header.nextPagePtr) {
-        mergedData = Buffer.concat([
-          mergedData,
-          this.mergeTableData(tableHeader.TDEF_header.nextPagePtr),
+        mergedData = new Uint8Array([
+          ...mergedData,
+          ...this.mergeTableData(tableHeader.TDEF_header.nextPagePtr),
         ]);
       }
       const parsedData = parseTableData(
@@ -258,14 +251,9 @@ class AccessTable {
       );
       columns = parsedData.column as any;
       colNames = parsedData.columnNames;
-      // REMOVE FOR NOW
-      // (tableHeader as any).column = parsedData.column;
-      // (tableHeader as any).columnNames = parsedData.columnNames;
     } catch (err) {
       throw new Error(`Failed to parse table header`);
     }
-    // const colNames = tableHeader.columnNames;
-    // const columns = tableHeader.column;
     columns.forEach((c, i) => {
       c.colNameStr = colNames[i].colNameStr;
     });
@@ -283,14 +271,14 @@ class AccessTable {
       );
     return [columnDict, tableHeader];
   }
-  private mergeTableData(firstPage: number): Buffer {
+  private mergeTableData(firstPage: number): Uint8Array {
     let table = this.tableDefs[firstPage * this.pageSize]!;
     let parsedHeader = TDEF_HEADER.parse(table);
     let data = table.slice(parsedHeader.headerEnd);
     while (parsedHeader.nextPagePtr) {
       table = this.tableDefs[parsedHeader.nextPagePtr * this.pageSize]!;
       parsedHeader = TDEF_HEADER.parse(table);
-      data = Buffer.concat([data, table.slice(parsedHeader.headerEnd)]);
+      data = new Uint8Array([...data, ...table.slice(parsedHeader.headerEnd)]);
     }
     return data;
   }
@@ -303,7 +291,7 @@ class AccessTable {
     }
     return parsedTable;
   }
-  private getOverflowRecord(recordPointer: number): Buffer | undefined {
+  private getOverflowRecord(recordPointer: number): Uint8Array | undefined {
     const recordOffset = (recordPointer & 0xff) >>> 0;
     const pageNum = recordPointer >>> 8;
     const recordPage = this.dataPages[pageNum * this.pageSize];
@@ -313,7 +301,7 @@ class AccessTable {
     let start = parsedData.recordOffsets[recordOffset];
     if ((start & 0x8000) >>> 0) start = (start & 0xfff) >>> 0;
     else console.log(`Overflow record flag is not present ${start}`);
-    let record: Buffer;
+    let record: Uint8Array;
     if (recordOffset === 0) {
       record = recordPage.slice(start);
     } else {
@@ -324,12 +312,12 @@ class AccessTable {
     return record;
   }
   private parseFixedLengthData(
-    originalRecord: Buffer,
+    originalRecord: Uint8Array,
     column: Column,
     nullTable: Array<boolean>,
   ) {
     const columnName = column.colNameStr;
-    let parsedType: boolean | string | number;
+    let parsedType: boolean | string | number | null;
     if (column.type === DataType.Boolean) {
       if (column.columnID > nullTable.length)
         throw new Error(
@@ -337,20 +325,25 @@ class AccessTable {
         );
       parsedType = nullTable[column.columnID];
     } else {
-      if (column.fixedOffset > originalRecord.length)
-        throw new Error(
-          `Column offset is bigger than the length of the record ${column.fixedOffset}`,
-        );
-      const record = originalRecord.slice(column.fixedOffset);
-      parsedType = parseType(column.type, record, this.version);
+      // Check nullTable first
+      if (nullTable[column.columnID] === false) {
+        parsedType = null; // Explicitly set to null
+      } else {
+        if (column.fixedOffset > originalRecord.length)
+          throw new Error(
+            `Column offset is bigger than the length of the record ${column.fixedOffset}`,
+          );
+        const record = originalRecord.slice(column.fixedOffset);
+        parsedType = parseType(column.type, record, this.version);
+      }
     }
     if (this.parsedTable[columnName] === undefined)
       this.parsedTable[columnName] = [];
     this.parsedTable[columnName]!.push(parsedType);
   }
   private parseDynamicLengthRecordsMetadata(
-    reverseRecord: Buffer,
-    originalRecord: Buffer,
+    reverseRecord: Uint8Array,
+    originalRecord: Uint8Array,
     nullTableLength: number,
   ) {
     if (this.version > 3) {
@@ -378,16 +371,17 @@ class AccessTable {
       );
       relativeRecordMetadata.relativeMetadataEnd += nullTableLength;
     } catch {
-      throw new Error('Failed parsing record');
+      throw new Error("Failed parsing record");
     }
     if (
       relativeRecordMetadata &&
       relativeRecordMetadata.variableLengthFieldCount !==
         this.tableHeader.variableColumns
     ) {
-      const tmpBuffer = Buffer.allocUnsafe(2);
-      tmpBuffer.writeUInt16LE(this.tableHeader.variableColumns);
-      const metadataStart = reverseRecord.indexOf(tmpBuffer);
+      const tmpBuffer = new Uint8Array(2);
+      const tmpDataView = new DataView(tmpBuffer.buffer);
+      tmpDataView.setUint16(0, this.tableHeader.variableColumns, true);
+      const metadataStart = reverseRecord.indexOf(tmpBuffer[0]);
       if (metadataStart !== 1 && metadataStart < 10) {
         reverseRecord = reverseRecord.slice(metadataStart);
         try {
@@ -410,38 +404,39 @@ class AccessTable {
     return relativeRecordMetadata;
   }
   private parseMemo(
-    relativeObjData: Buffer,
+    relativeObjData: Uint8Array,
     column: Column,
   ): string | number | boolean {
-    console.log(`Parsing memo field ${relativeObjData}`);
+    // console.log(`Parsing memo field ${relativeObjData}`);
     const parsedMemo = MEMO.parse(relativeObjData);
-    let memoData: Buffer;
+    let memoData: Uint8Array;
     let memoType: DataType;
     if (parsedMemo.memoLength & 0x80000000) {
-      console.log('Memo data inline');
+      // console.log("Memo data inline");
       memoData = relativeObjData.slice(parsedMemo.memoEnd);
       memoType = DataType.Text;
     } else if (parsedMemo.memoLength & 0x40000000) {
-      console.log('LVAL type 1');
+      // console.log("LVAL type 1");
       const tmp = this.getOverflowRecord(parsedMemo.recordPointer);
       if (tmp === undefined)
-        throw new Error('LVAL type 1 memoData is undefined');
+        throw new Error("LVAL type 1 memoData is undefined");
       memoData = tmp;
       memoType = DataType.Text;
     } else {
-      console.log('LVAL type 2');
-      console.log('memo lval type 2 currently not supported');
+      // console.log("LVAL type 2");
+      console.log("memo lval type 2 currently not supported");
       memoData = relativeObjData;
       memoType = column.type;
     }
     return parseType(memoType, memoData, memoData.length, this.version);
   }
   private parseDynamicLengthData(
-    originalRecord: Buffer,
+    originalRecord: Uint8Array,
     relativeRecordMetadata: ReturnType<
       typeof parseRelativeObjectMetadataStruct
     >,
     relativeRecordsColumnMap: Dico<Column>,
+    nullTable: Array<boolean>,
   ): void {
     const relativeOffsets = relativeRecordMetadata.variableLengthFieldOffsets;
     let jumpTableAddition = 0;
@@ -450,6 +445,16 @@ class AccessTable {
       i += 1;
       const column = relativeRecordsColumnMap[columnIndex]!;
       const colName = column.colNameStr;
+
+      if (column.columnID < nullTable.length && !nullTable[column.columnID]) {
+        // Explicit null check using nullTable
+        if (this.parsedTable[colName] === undefined) {
+          this.parsedTable[colName] = [];
+        }
+        this.parsedTable[colName]!.push(null); // Push null value
+        continue; // Skip parsing for null column
+      }
+
       if (this.version === 3) {
         if (relativeRecordMetadata.variableLengthJumpTable.includes(i))
           jumpTableAddition = (jumpTableAddition + 0x100) >>> 0;
@@ -467,7 +472,7 @@ class AccessTable {
       if (relStart === relEnd) {
         if (this.parsedTable[colName] === undefined)
           this.parsedTable[colName] = [];
-        this.parsedTable[colName]!.push('');
+        this.parsedTable[colName]!.push("");
         continue;
       }
       const relativeObjData = originalRecord.slice(
@@ -480,7 +485,7 @@ class AccessTable {
           parsedType = this.parseMemo(relativeObjData, column);
         } catch {
           console.log(`Failed to parse memo field. Using data as bytes`);
-          parsedType = relativeObjData.toString();
+          parsedType = new TextDecoder("utf-8").decode(relativeObjData);
         }
       } else {
         parsedType = parseType(
@@ -495,11 +500,9 @@ class AccessTable {
       this.parsedTable[colName]!.push(parsedType);
     }
   }
-  private parseRow(record: Buffer): void {
-    const originalRecord = Buffer.allocUnsafe(record.length);
-    record.copy(originalRecord);
-    let reverseRecord = Buffer.allocUnsafe(record.length);
-    record.copy(reverseRecord);
+  private parseRow(record: Uint8Array): void {
+    const originalRecord = new Uint8Array(record);
+    let reverseRecord = new Uint8Array(record);
     reverseRecord = reverseRecord.reverse();
     const nullTableLen = Math.floor((this.tableHeader.columnCount + 7) / 8);
     const nullTable: Array<boolean> = [];
@@ -512,7 +515,7 @@ class AccessTable {
           (nullTableBuffer[Math.floor(i / 8)] &
             (((1 << i % 8) >>> 0) >>> 0)) !==
             0,
-        ); // CHECK MOD
+        );
     } else {
       throw new Error(
         `Failed to parse null table column count ${this.tableHeader.columnCount}`,
@@ -540,6 +543,7 @@ class AccessTable {
         originalRecord,
         metadata,
         relativeRecordsColumnMap,
+        nullTable,
       );
     }
   }
@@ -561,12 +565,17 @@ class AccessTable {
             recPtrOffset,
             recPtrOffset + 4,
           );
-          const overflowRecPtr = overflowRecPtrBuffer.readUInt32LE(0);
+          const dataView = new DataView(
+            overflowRecPtrBuffer.buffer,
+            overflowRecPtrBuffer.byteOffset,
+            overflowRecPtrBuffer.byteLength,
+          );
+          const overflowRecPtr = dataView.getUint32(0, true);
           const record = this.getOverflowRecord(overflowRecPtr);
           if (record !== undefined) this.parseRow(record);
           continue;
         }
-        let record: Buffer;
+        let record: Uint8Array;
         if (!lastOffset) record = originalData.slice(recOffset);
         else record = originalData.slice(recOffset, lastOffset);
         lastOffset = recOffset;

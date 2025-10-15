@@ -1,7 +1,4 @@
-import UUID from 'uuid';
-import { Version, Dico } from './types';
-// @ts-ignore
-import { TextDecoder } from 'text-decoding';
+import { Version, Dico } from "./types";
 
 export enum DataType {
   Boolean = 1,
@@ -21,108 +18,134 @@ export enum DataType {
   Complex = 18,
 }
 
-const TABLE_PAGE_MAGIC = Buffer.from([0x02, 0x01]);
-const DATA_PAGE_MAGIC = Buffer.from([0x01, 0x01]);
+const TABLE_PAGE_MAGIC = new Uint8Array([0x02, 0x01]);
+const DATA_PAGE_MAGIC = new Uint8Array([0x01, 0x01]);
 
 export const parseType = function (
   dataType: DataType,
-  buffer: Buffer,
+  buffer: Uint8Array,
   length?: number,
   version: Version = 3,
 ) {
-  let parsed: number | string = '';
-  let buf: Buffer;
+  let parsed: number | string = "";
+  const dataView = new DataView(
+    buffer.buffer,
+    buffer.byteOffset,
+    buffer.byteLength,
+  );
   switch (dataType) {
     case DataType.Int8:
-      parsed = buffer.readInt8(0);
+      parsed = dataView.getInt8(0);
       break;
     case DataType.Int16:
-      parsed = buffer.readInt16LE(0);
+      parsed = dataView.getInt16(0, true);
       break;
     case DataType.Int32:
     case DataType.Complex:
-      parsed = buffer.readInt32LE(0);
+      parsed = dataView.getInt32(0, true);
       break;
     case DataType.Float32:
-      parsed = buffer.readFloatLE(0);
+      parsed = dataView.getFloat32(0, true);
       break;
     case DataType.Float64:
-      parsed = buffer.readDoubleLE(0);
+      parsed = dataView.getFloat64(0, true);
       break;
     case DataType.Money:
-      parsed =
-        buffer.readUInt32LE(0) + buffer.readUInt32LE(4) * Math.pow(0x10, 8);
+      const low = dataView.getUint32(0, true);
+      const high = dataView.getInt32(4, true);
+      const combined = low + high * 0x100000000;
+      parsed = combined / 10000;
       break;
     case DataType.DateTime:
-      const daysPassed = Math.floor(buffer.readDoubleLE(0));
-      // ms access expresses hours in decimals
-      const hoursPassedDecimal = buffer.readDoubleLE(0) % 1;
+      const daysSinceEpoch = dataView.getFloat64(0, true);
+      const daysPassed = Math.floor(daysSinceEpoch);
+      const hoursPassedDecimal = daysSinceEpoch % 1;
       const hours = Math.floor(hoursPassedDecimal * 24);
       const minutes = Math.floor(((hoursPassedDecimal * 24) % 1) * 60);
       const seconds = Math.floor(
         ((((hoursPassedDecimal * 24) % 1) * 60) % 1) * 60,
       );
-      const date = new Date('1899/12/30');
-      date.setHours(12, 0, 0, 0);
+      const date = new Date("1899-12-30T12:00:00Z");
       date.setDate(date.getDate() + daysPassed);
       date.setHours(hours, minutes, seconds);
-      // todo check TIME ZONE
       parsed = date.toISOString();
       break;
     case DataType.Binary:
-      parsed = buffer.slice(0, length).toString('utf8'); // Maybe
+      parsed = new TextDecoder("utf-8").decode(buffer.subarray(0, length));
       break;
     case DataType.GUID:
-      parsed = UUID.stringify(buffer.slice(0, 16));
+      const guidBytes = buffer.subarray(0, 16);
+      parsed = uuidStringify(guidBytes);
       break;
     case DataType.Bit96Bytes17:
-      parsed = buffer.slice(0, 17).toString('utf8'); // Maybe
+      parsed = new TextDecoder("utf-8").decode(buffer.subarray(0, 17));
       break;
     case DataType.Text:
       if (version > 3) {
-        const first =
-          Buffer.compare(buffer.slice(0, 2), Buffer.from([0xfe, 0xff])) === 0;
-        const second =
-          Buffer.compare(buffer.slice(0, 2), Buffer.from([0xff, 0xfe])) === 0;
+        const first = buffer[0] === 0xfe && buffer[1] === 0xff;
+        const second = buffer[0] === 0xff && buffer[1] === 0xfe;
         if (first || second) {
-          parsed = new TextDecoder('utf-8').decode(buffer.slice(2));
+          parsed = new TextDecoder("windows-1252").decode(buffer.subarray(2));
         } else {
-          parsed = new TextDecoder('utf-16le').decode(buffer);
+          parsed = new TextDecoder("utf-16le").decode(buffer);
         }
       } else {
-        parsed = buffer.toString('utf8');
+        parsed = new TextDecoder("utf-8").decode(buffer);
       }
       break;
   }
   return parsed;
 };
 
+function uuidStringify(bytes: Uint8Array): string {
+  const hex = Array.from(bytes).map((b) => ("00" + b.toString(16)).slice(-2));
+  return [
+    hex.slice(0, 4).join(""),
+    hex.slice(4, 6).join(""),
+    hex.slice(6, 8).join(""),
+    hex.slice(8, 10).join(""),
+    hex.slice(10, 16).join(""),
+  ].join("-");
+}
+
 export const categorizePages = function (
-  dbData: Buffer,
+  dbData: Uint8Array,
   pageSize: number,
-): [Dico<Buffer>, Dico<Buffer>, Dico<Buffer>] {
+): [Dico<Uint8Array>, Dico<Uint8Array>, Dico<Uint8Array>] {
   if (dbData.length % pageSize)
     throw new Error(
       `DB is not full or pageSize is wrong. pageSize: ${pageSize} dbData.length: ${dbData.length}`,
     );
-  const pages: Dico<Buffer> = {};
+  const pages: Dico<Uint8Array> = {};
   for (let i = 0; i < dbData.length; i += pageSize)
     pages[i] = dbData.slice(i, i + pageSize);
-  const dataPages: Dico<Buffer> = {};
-  const tableDefs: Dico<Buffer> = {};
+  const dataPages: Dico<Uint8Array> = {};
+  const tableDefs: Dico<Uint8Array> = {};
   for (const page of Object.keys(pages)) {
     const comp1 =
-      Buffer.compare(
+      compareUint8Arrays(
         DATA_PAGE_MAGIC,
-        pages[page]!.slice(0, DATA_PAGE_MAGIC.length),
+        pages[page]!.subarray(0, DATA_PAGE_MAGIC.length),
       ) === 0;
     const comp2 =
-      Buffer.compare(
+      compareUint8Arrays(
         TABLE_PAGE_MAGIC,
-        pages[page]!.slice(0, TABLE_PAGE_MAGIC.length),
+        pages[page]!.subarray(0, TABLE_PAGE_MAGIC.length),
       ) === 0;
     if (comp1) dataPages[page] = pages[page];
     else if (comp2) tableDefs[page] = pages[page];
   }
   return [tableDefs, dataPages, pages];
 };
+
+function compareUint8Arrays(a: Uint8Array, b: Uint8Array): number {
+  if (a.length !== b.length) {
+    return a.length - b.length;
+  }
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) {
+      return a[i] - b[i];
+    }
+  }
+  return 0;
+}
