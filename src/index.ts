@@ -325,18 +325,30 @@ class AccessTable {
     if (this.parsedTable[columnName] === undefined)
       this.parsedTable[columnName] = [];
 
-    if (nullTable[column.columnID]) {
-      this.parsedTable[columnName]!.push(null);
-      return;
+    let parsedType: boolean | string | number | null;
+
+    if (column.type === DataType.Boolean) {
+      if (column.columnID >= nullTable.length)
+        throw new Error(
+          `Failed to parse bool field, Column not found in nullTable column: ${columnName}, column id: ${column.columnID}, nullTable: ${nullTable}`,
+        );
+      parsedType = nullTable[column.columnID];
+    } else {
+      if (column.columnID >= nullTable.length)
+        throw new Error(
+          `Failed to parse field, column not found in nullTable column: ${columnName}, column id: ${column.columnID}, nullTable: ${nullTable}`,
+        );
+      if (nullTable[column.columnID] === false) {
+        parsedType = null;
+      } else {
+        if (column.fixedOffset >= originalRecord.length)
+          throw new Error(
+            `Column offset is bigger than the length of the record ${column.fixedOffset}`,
+          );
+        const record = originalRecord.slice(column.fixedOffset);
+        parsedType = parseType(column.type, record, undefined, this.version);
+      }
     }
-
-    if (column.fixedOffset >= originalRecord.length)
-      throw new Error(
-        `Column offset is bigger than the length of the record ${column.fixedOffset}`,
-      );
-
-    const record = originalRecord.slice(column.fixedOffset);
-    const parsedType = parseType(column.type, record, undefined, this.version);
     this.parsedTable[columnName]!.push(parsedType);
   }
   private parseDynamicLengthRecordsMetadata(
@@ -444,13 +456,12 @@ class AccessTable {
       const column = relativeRecordsColumnMap[columnIndex]!;
       const colName = column.colNameStr;
 
-      if (column.columnID < nullTable.length && nullTable[column.columnID]) {
-        // Explicit null check using nullTable
+      if (column.columnID < nullTable.length && nullTable[column.columnID] === false) {
         if (this.parsedTable[colName] === undefined) {
           this.parsedTable[colName] = [];
         }
-        this.parsedTable[colName]!.push(null); // Push null value
-        continue; // Skip parsing for null column
+        this.parsedTable[colName]!.push(null);
+        continue;
       }
 
       if (this.version === 3) {
