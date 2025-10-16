@@ -444,7 +444,7 @@ class AccessTable {
       const column = relativeRecordsColumnMap[columnIndex]!;
       const colName = column.colNameStr;
 
-      if (column.columnID < nullTable.length && !nullTable[column.columnID]) {
+      if (column.columnID < nullTable.length && nullTable[column.columnID]) {
         // Explicit null check using nullTable
         if (this.parsedTable[colName] === undefined) {
           this.parsedTable[colName] = [];
