@@ -27,13 +27,16 @@ export const parseType = function (
   length?: number,
   version: Version = 3,
 ) {
-  let parsed: number | string = "";
+  let parsed: number | string | boolean;
   const dataView = new DataView(
     buffer.buffer,
     buffer.byteOffset,
     buffer.byteLength,
   );
   switch (dataType) {
+    case DataType.Boolean:
+      parsed = buffer[0] !== 0;
+      break;
     case DataType.Int8:
       parsed = dataView.getInt8(0);
       break;
@@ -92,6 +95,11 @@ export const parseType = function (
       } else {
         parsed = new TextDecoder("utf-8").decode(buffer);
       }
+      break;
+    default:
+      parsed = new TextDecoder("utf-8").decode(
+        buffer.subarray(0, length ?? buffer.length),
+      );
       break;
   }
   return parsed;
