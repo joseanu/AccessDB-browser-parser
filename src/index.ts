@@ -8,7 +8,14 @@ import {
   parseTableData,
   parseRelativeObjectMetadataStruct,
 } from "./parsing-primitives";
-import { Dico } from "./types";
+import {
+  AccessParserError,
+  AccessParserLogLevel,
+  AccessParserOptions,
+  AccessParserWarning,
+  AccessParserWarningCode,
+  Dico,
+} from "./types";
 
 const PAGE_SIZE_V3 = 0x800;
 const PAGE_SIZE_V4 = 0x1000;
@@ -28,6 +35,13 @@ enum ALL_VERSIONS {
 const NEW_VERSIONS = [VERSION_4, VERSION_5, VERSION_2010];
 
 const SYSTEM_TABLE_FLAGS = [-0x80000000, -0x00000002, 0x80000000, 0x00000002];
+const LOG_LEVEL_RANK: { [K in AccessParserLogLevel]: number } = {
+  silent: 0,
+  error: 1,
+  warn: 2,
+  info: 3,
+};
+const WARN_PRINT_LIMIT = 3;
 
 class TableObject {
   public value: Uint8Array;
@@ -55,8 +69,14 @@ export class AccessParser {
   private version = ALL_VERSIONS.VERSION_3;
   private pageSize = PAGE_SIZE_V3;
   private catalog: Dico<number>;
-  public constructor(dbData: Uint8Array) {
+  private logLevel: AccessParserLogLevel;
+  private onWarning?: (warning: AccessParserWarning) => void;
+  private onError?: (error: AccessParserError) => void;
+  public constructor(dbData: Uint8Array, options: AccessParserOptions = {}) {
     this.dbData = dbData;
+    this.logLevel = options.logLevel ?? "warn";
+    this.onWarning = options.onWarning;
+    this.onError = options.onError;
     this.parseFileHeader();
     [this.tableDefs, this.dataPages] = categorizePages(
       this.dbData,
@@ -64,6 +84,18 @@ export class AccessParser {
     );
     this.tablesWithData = this.linkTablesToData();
     this.catalog = this.parseCatalog();
+  }
+  private shouldLog(level: "error" | "warn" | "info"): boolean {
+    return LOG_LEVEL_RANK[this.logLevel] >= LOG_LEVEL_RANK[level];
+  }
+  private error(code: string, message: string, error?: unknown, meta?: unknown) {
+    if (this.onError) this.onError({ code, message, error, meta });
+    if (!this.shouldLog("error")) return;
+    if (error !== undefined && meta !== undefined)
+      console.error(`[${code}] ${message}`, { meta, error });
+    else if (error !== undefined) console.error(`[${code}] ${message}`, error);
+    else if (meta !== undefined) console.error(`[${code}] ${message}`, meta);
+    else console.error(`[${code}] ${message}`);
   }
   private parseFileHeader(): void {
     let head: ReturnType<typeof ACCESSHEADER.parse>;
@@ -95,7 +127,12 @@ export class AccessParser {
       try {
         parsedDP = parseDataPageHeader(data, this.version);
       } catch {
-        console.error(`Failed to parse data page ${data}`);
+        this.error(
+          "ERR_DB_DATA_PAGE_PARSE_FAILED",
+          "Failed to parse data page",
+          undefined,
+          { pageIndex: parseInt(i, 10) / this.pageSize },
+        );
         continue;
       }
       const pageOffset = parsedDP.owner * this.pageSize;
@@ -123,6 +160,9 @@ export class AccessParser {
       this.pageSize,
       this.dataPages,
       this.tableDefs,
+      this.logLevel,
+      this.onWarning,
+      this.onError,
     );
     const catalog = accessTable.parse();
     const tablesMapping: Dico<number> = {};
@@ -172,6 +212,9 @@ export class AccessParser {
       this.pageSize,
       this.dataPages,
       this.tableDefs,
+      this.logLevel,
+      this.onWarning,
+      this.onError,
     );
     return accessTable.parse();
   }
@@ -215,20 +258,80 @@ class AccessTable {
   private parsedTable: Dico<Array<string | number | boolean | null>>;
   private columns: Dico<Column>;
   private tableHeader: TableHeader;
+  private logLevel: AccessParserLogLevel;
+  private onWarning?: (warning: AccessParserWarning) => void;
+  private onError?: (error: AccessParserError) => void;
+  private warningCountsBySignature: Map<string, number>;
+  private warningTotalsByCode: Map<AccessParserWarningCode, number>;
   public constructor(
     table: TableObject,
     version: ALL_VERSIONS,
     pageSize: number,
     dataPages: Dico<Uint8Array>,
     tableDefs: Dico<Uint8Array>,
+    logLevel: AccessParserLogLevel,
+    onWarning?: (warning: AccessParserWarning) => void,
+    onError?: (error: AccessParserError) => void,
   ) {
     this.version = version;
     this.pageSize = pageSize;
     this.dataPages = dataPages;
     this.tableDefs = tableDefs;
     this.table = table;
+    this.logLevel = logLevel;
+    this.onWarning = onWarning;
+    this.onError = onError;
+    this.warningCountsBySignature = new Map<string, number>();
+    this.warningTotalsByCode = new Map<AccessParserWarningCode, number>();
     this.parsedTable = {};
     [this.columns, this.tableHeader] = this.getTableColumns();
+  }
+  private shouldLog(level: "error" | "warn" | "info"): boolean {
+    return LOG_LEVEL_RANK[this.logLevel] >= LOG_LEVEL_RANK[level];
+  }
+  private serializeMeta(meta: unknown): string {
+    if (meta === undefined) return "";
+    if (meta === null) return "null";
+    if (typeof meta !== "object") return String(meta);
+    if (Array.isArray(meta))
+      return `[${meta.map((item) => this.serializeMeta(item)).join(",")}]`;
+    const obj = meta as { [key: string]: unknown };
+    const keys = Object.keys(obj).sort();
+    const entries = keys.map(
+      (key) => `${key}:${this.serializeMeta(obj[key])}`,
+    );
+    return `{${entries.join(",")}}`;
+  }
+  private warn(
+    code: AccessParserWarningCode,
+    message: string,
+    meta?: unknown,
+  ): void {
+    const signature = `${code}|${message}|${this.serializeMeta(meta)}`;
+    const occurrence = (this.warningCountsBySignature.get(signature) ?? 0) + 1;
+    this.warningCountsBySignature.set(signature, occurrence);
+    this.warningTotalsByCode.set(code, (this.warningTotalsByCode.get(code) ?? 0) + 1);
+    if (this.onWarning) this.onWarning({ code, message, meta, occurrence, signature });
+    if (!this.shouldLog("warn")) return;
+    if (occurrence > WARN_PRINT_LIMIT) return;
+    if (meta !== undefined) console.warn(`[${code}] ${message}`, meta);
+    else console.warn(`[${code}] ${message}`);
+  }
+  private error(code: string, message: string, error?: unknown, meta?: unknown): void {
+    if (this.onError) this.onError({ code, message, error, meta });
+    if (!this.shouldLog("error")) return;
+    if (error !== undefined && meta !== undefined)
+      console.error(`[${code}] ${message}`, { meta, error });
+    else if (error !== undefined) console.error(`[${code}] ${message}`, error);
+    else if (meta !== undefined) console.error(`[${code}] ${message}`, meta);
+    else console.error(`[${code}] ${message}`);
+  }
+  private emitWarningsSummary(): void {
+    if (!this.shouldLog("warn")) return;
+    for (const [code, total] of this.warningTotalsByCode.entries()) {
+      if (total <= WARN_PRINT_LIMIT) continue;
+      console.warn(`[${code}] x${total}`);
+    }
   }
   private getTableColumns(): [Dico<Column>, TableHeader] {
     let tableHeader: TableHeader;
@@ -300,7 +403,12 @@ class AccessTable {
     if (recordOffset >= parsedData.recordOffsets.length) return;
     let start = parsedData.recordOffsets[recordOffset];
     if ((start & 0x8000) >>> 0) start = (start & 0xfff) >>> 0;
-    else console.log(`Overflow record flag is not present ${start}`);
+    else
+      this.warn(
+        "WARN_DB_OVERFLOW_FLAG_MISSING",
+        "Overflow record flag is not present",
+        { start, recordOffset, pageNum },
+      );
     let record: Uint8Array;
     if (recordOffset === 0) {
       record = recordPage.slice(start);
@@ -405,8 +513,13 @@ class AccessTable {
         }
         relativeRecordMetadata.relativeMetadataEnd += metadataStart;
       } else {
-        console.log(
-          `Record did not parse correctly. Number of columns: ${this.tableHeader.variableColumns}. Number of parsed columns: ${relativeRecordMetadata.variableLengthFieldCount}`,
+        this.warn(
+          "WARN_DB_RECORD_METADATA_MISMATCH",
+          "Record metadata mismatch",
+          {
+            expectedColumns: this.tableHeader.variableColumns,
+            parsedColumns: relativeRecordMetadata.variableLengthFieldCount,
+          },
         );
         return;
       }
@@ -434,7 +547,10 @@ class AccessTable {
       memoType = DataType.Text;
     } else {
       // console.log("LVAL type 2");
-      console.log("memo lval type 2 currently not supported");
+      this.warn(
+        "WARN_DB_MEMO_LVAL2_UNSUPPORTED",
+        "Memo LVAL type 2 currently not supported",
+      );
       memoData = relativeObjData;
       memoType = column.type;
     }
@@ -493,7 +609,11 @@ class AccessTable {
         try {
           parsedType = this.parseMemo(relativeObjData, column);
         } catch {
-          console.log(`Failed to parse memo field. Using data as bytes`);
+          this.warn(
+            "WARN_DB_MEMO_FALLBACK_TO_BYTES",
+            "Failed to parse memo field. Using data as bytes",
+            { column: colName },
+          );
           parsedType = new TextDecoder("utf-8").decode(relativeObjData);
         }
       } else {
@@ -591,6 +711,7 @@ class AccessTable {
         if (record) this.parseRow(record);
       }
     }
+    this.emitWarningsSummary();
     return this.parsedTable;
   }
 }
