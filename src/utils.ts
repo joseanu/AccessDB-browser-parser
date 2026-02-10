@@ -61,17 +61,10 @@ export const parseType = function (
       break;
     case DataType.DateTime:
       const daysSinceEpoch = dataView.getFloat64(0, true);
-      const daysPassed = Math.floor(daysSinceEpoch);
-      const hoursPassedDecimal = daysSinceEpoch % 1;
-      const hours = Math.floor(hoursPassedDecimal * 24);
-      const minutes = Math.floor(((hoursPassedDecimal * 24) % 1) * 60);
-      const seconds = Math.floor(
-        ((((hoursPassedDecimal * 24) % 1) * 60) % 1) * 60,
-      );
-      const date = new Date("1899-12-30T12:00:00Z");
-      date.setDate(date.getDate() + daysPassed);
-      date.setHours(hours, minutes, seconds);
-      parsed = date.toISOString();
+      const msPerDay = 24 * 60 * 60 * 1000;
+      const accessEpochUtc = Date.UTC(1899, 11, 30, 0, 0, 0, 0);
+      const timestamp = accessEpochUtc + daysSinceEpoch * msPerDay;
+      parsed = new Date(timestamp).toISOString();
       break;
     case DataType.Binary:
       parsed = new TextDecoder("utf-8").decode(buffer.subarray(0, length));

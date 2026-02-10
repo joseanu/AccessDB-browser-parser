@@ -297,7 +297,7 @@ class AccessTable {
     const recordPage = this.dataPages[pageNum * this.pageSize];
     if (!recordPage) return;
     const parsedData = parseDataPageHeader(recordPage, this.version);
-    if (recordOffset > parsedData.recordOffsets.length) return;
+    if (recordOffset >= parsedData.recordOffsets.length) return;
     let start = parsedData.recordOffsets[recordOffset];
     if ((start & 0x8000) >>> 0) start = (start & 0xfff) >>> 0;
     else console.log(`Overflow record flag is not present ${start}`);
@@ -541,7 +541,7 @@ class AccessTable {
       }
       this.parseFixedLengthData(record, column, nullTable);
     }
-    if (relativeRecordsColumnMap) {
+    if (Object.keys(relativeRecordsColumnMap).length > 0) {
       const metadata = this.parseDynamicLengthRecordsMetadata(
         reverseRecord,
         originalRecord,
