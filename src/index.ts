@@ -701,14 +701,34 @@ class AccessTable {
           );
           const overflowRecPtr = dataView.getUint32(0, true);
           const record = this.getOverflowRecord(overflowRecPtr);
-          if (record !== undefined) this.parseRow(record);
+          if (record !== undefined) {
+            try {
+              this.parseRow(record);
+            } catch (error) {
+              this.warn(
+                "WARN_DB_ROW_SKIPPED_PARSE_ERROR",
+                "Skipping row due parse error",
+                { message: error instanceof Error ? error.message : String(error) },
+              );
+            }
+          }
           continue;
         }
         let record: Uint8Array;
         if (!lastOffset) record = originalData.slice(recOffset);
         else record = originalData.slice(recOffset, lastOffset);
         lastOffset = recOffset;
-        if (record) this.parseRow(record);
+        if (record) {
+          try {
+            this.parseRow(record);
+          } catch (error) {
+            this.warn(
+              "WARN_DB_ROW_SKIPPED_PARSE_ERROR",
+              "Skipping row due parse error",
+              { message: error instanceof Error ? error.message : String(error) },
+            );
+          }
+        }
       }
     }
     this.emitWarningsSummary();

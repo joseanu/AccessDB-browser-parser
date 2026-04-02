@@ -11,7 +11,8 @@ export type AccessParserWarningCode =
   | "WARN_DB_OVERFLOW_FLAG_MISSING"
   | "WARN_DB_RECORD_METADATA_MISMATCH"
   | "WARN_DB_MEMO_LVAL2_UNSUPPORTED"
-  | "WARN_DB_MEMO_FALLBACK_TO_BYTES";
+  | "WARN_DB_MEMO_FALLBACK_TO_BYTES"
+  | "WARN_DB_ROW_SKIPPED_PARSE_ERROR";
 
 export interface AccessParserWarning {
   code: AccessParserWarningCode;
