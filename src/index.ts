@@ -1,14 +1,13 @@
-import { categorizePages, DataType, parseType } from "./utils";
 import {
   ACCESSHEADER,
-  TDEF_HEADER,
   MEMO,
   parseDataPageHeader,
-  parseTableHead,
-  parseTableData,
   parseRelativeObjectMetadataStruct,
+  parseTableData,
+  parseTableHead,
+  TDEF_HEADER,
 } from "./parsing-primitives";
-import {
+import type {
   AccessParserError,
   AccessParserLogLevel,
   AccessParserOptions,
@@ -16,6 +15,7 @@ import {
   AccessParserWarningCode,
   Dico,
 } from "./types";
+import { categorizePages, DataType, parseType } from "./utils";
 
 const PAGE_SIZE_V3 = 0x800;
 const PAGE_SIZE_V4 = 0x1000;
@@ -78,10 +78,7 @@ export class AccessParser {
     this.onWarning = options.onWarning;
     this.onError = options.onError;
     this.parseFileHeader();
-    [this.tableDefs, this.dataPages] = categorizePages(
-      this.dbData,
-      this.pageSize,
-    );
+    [this.tableDefs, this.dataPages] = categorizePages(this.dbData, this.pageSize);
     this.tablesWithData = this.linkTablesToData();
     this.catalog = this.parseCatalog();
   }
@@ -102,21 +99,16 @@ export class AccessParser {
     try {
       head = ACCESSHEADER.parse(this.dbData);
     } catch {
-      throw new Error(
-        "Failed to parse DB file header. Check it is a valid file header",
-      );
+      throw new Error("Failed to parse DB file header. Check it is a valid file header");
     }
     const version = head.jetVersion;
     if (NEW_VERSIONS.includes(version)) {
       if (version === VERSION_4) this.version = ALL_VERSIONS.VERSION_4;
       else if (version === VERSION_5) this.version = ALL_VERSIONS.VERSION_5;
-      else if (version === VERSION_2010)
-        this.version = ALL_VERSIONS.VERSION_2010;
+      else if (version === VERSION_2010) this.version = ALL_VERSIONS.VERSION_2010;
       this.pageSize = PAGE_SIZE_V4;
     } else if (version !== VERSION_3) {
-      throw new Error(
-        `Unknown database version ${version} Trying to parse database as version 3`,
-      );
+      throw new Error(`Unknown database version ${version} Trying to parse database as version 3`);
     }
   }
   private linkTablesToData(): Dico<TableObject> {
@@ -127,12 +119,9 @@ export class AccessParser {
       try {
         parsedDP = parseDataPageHeader(data, this.version);
       } catch {
-        this.error(
-          "ERR_DB_DATA_PAGE_PARSE_FAILED",
-          "Failed to parse data page",
-          undefined,
-          { pageIndex: parseInt(i, 10) / this.pageSize },
-        );
+        this.error("ERR_DB_DATA_PAGE_PARSE_FAILED", "Failed to parse data page", undefined, {
+          pageIndex: parseInt(i, 10) / this.pageSize,
+        });
         continue;
       }
       const pageOffset = parsedDP.owner * this.pageSize;
@@ -143,10 +132,7 @@ export class AccessParser {
       ) {
         const tablePageValue = this.tableDefs[pageOffset]!;
         if (!Object.keys(tablesWithData).includes(pageOffset.toString()))
-          tablesWithData[pageOffset] = new TableObject(
-            pageOffset,
-            tablePageValue,
-          );
+          tablesWithData[pageOffset] = new TableObject(pageOffset, tablePageValue);
         tablesWithData[pageOffset]!.linkedPages.push(data);
       }
     }
@@ -171,12 +157,7 @@ export class AccessParser {
     const types: Array<number> = catalog["Type"] as any;
     const flags: Array<number> = catalog["Flags"] as any;
     const ids: Array<number> = catalog["Id"] as any;
-    if (
-      names === undefined ||
-      types === undefined ||
-      flags === undefined ||
-      ids === undefined
-    )
+    if (names === undefined || types === undefined || flags === undefined || ids === undefined)
       throw new Error("The catalog is missing required fields");
     for (const tableName of names) {
       if (typeof tableName !== "string") continue;
@@ -192,16 +173,13 @@ export class AccessParser {
   }
   private parseTableUnformatted(tableName: string) {
     let tableOffset = this.catalog[tableName];
-    if (tableOffset === undefined)
-      throw new Error(`Could not find table ${tableName} in Database`);
+    if (tableOffset === undefined) throw new Error(`Could not find table ${tableName} in Database`);
     tableOffset *= this.pageSize;
-    let table = this.tablesWithData[tableOffset];
+    const table = this.tablesWithData[tableOffset];
     if (table === undefined) {
       const tableDef = this.tableDefs[tableOffset];
       if (tableDef === undefined) {
-        throw new Error(
-          `Could not find table ${tableName} offset ${tableOffset}`,
-        );
+        throw new Error(`Could not find table ${tableName} offset ${tableOffset}`);
       } else {
         throw new Error("Empty table");
       }
@@ -293,20 +271,13 @@ class AccessTable {
     if (meta === undefined) return "";
     if (meta === null) return "null";
     if (typeof meta !== "object") return String(meta);
-    if (Array.isArray(meta))
-      return `[${meta.map((item) => this.serializeMeta(item)).join(",")}]`;
+    if (Array.isArray(meta)) return `[${meta.map((item) => this.serializeMeta(item)).join(",")}]`;
     const obj = meta as { [key: string]: unknown };
     const keys = Object.keys(obj).sort();
-    const entries = keys.map(
-      (key) => `${key}:${this.serializeMeta(obj[key])}`,
-    );
+    const entries = keys.map((key) => `${key}:${this.serializeMeta(obj[key])}`);
     return `{${entries.join(",")}}`;
   }
-  private warn(
-    code: AccessParserWarningCode,
-    message: string,
-    meta?: unknown,
-  ): void {
+  private warn(code: AccessParserWarningCode, message: string, meta?: unknown): void {
     const signature = `${code}|${message}|${this.serializeMeta(meta)}`;
     const occurrence = (this.warningCountsBySignature.get(signature) ?? 0) + 1;
     this.warningCountsBySignature.set(signature, occurrence);
@@ -368,9 +339,7 @@ class AccessTable {
     }
     if (Object.keys(columnDict).length !== tableHeader.columnCount)
       throw new Error(
-        `Expected ${tableHeader.columnCount} columns got ${
-          Object.keys(columnDict).length
-        }`,
+        `Expected ${tableHeader.columnCount} columns got ${Object.keys(columnDict).length}`,
       );
     return [columnDict, tableHeader];
   }
@@ -388,7 +357,7 @@ class AccessTable {
   private createEmptyTable() {
     const parsedTable: Dico<Array<string | number | boolean>> = {};
     const [columns] = this.getTableColumns();
-    for (let i of Object.keys(columns)) {
+    for (const i of Object.keys(columns)) {
       const column = columns[i]!;
       parsedTable[column.colNameStr] = [];
     }
@@ -404,11 +373,11 @@ class AccessTable {
     let start = parsedData.recordOffsets[recordOffset];
     if ((start & 0x8000) >>> 0) start = (start & 0xfff) >>> 0;
     else
-      this.warn(
-        "WARN_DB_OVERFLOW_FLAG_MISSING",
-        "Overflow record flag is not present",
-        { start, recordOffset, pageNum },
-      );
+      this.warn("WARN_DB_OVERFLOW_FLAG_MISSING", "Overflow record flag is not present", {
+        start,
+        recordOffset,
+        pageNum,
+      });
     let record: Uint8Array;
     if (recordOffset === 0) {
       record = recordPage.slice(start);
@@ -430,8 +399,7 @@ class AccessTable {
         `Failed to parse field, column not found in nullTable column: ${columnName}, column id: ${column.columnID}, nullTable: ${nullTable}`,
       );
 
-    if (this.parsedTable[columnName] === undefined)
-      this.parsedTable[columnName] = [];
+    if (this.parsedTable[columnName] === undefined) this.parsedTable[columnName] = [];
 
     let parsedType: boolean | string | number | null;
 
@@ -468,19 +436,11 @@ class AccessTable {
       reverseRecord = reverseRecord.slice(nullTableLength + 1);
       if (reverseRecord.length > 1 && reverseRecord[0] === 0)
         reverseRecord = reverseRecord.slice(1);
-      return parseRelativeObjectMetadataStruct(
-        reverseRecord,
-        undefined,
-        this.version,
-      );
+      return parseRelativeObjectMetadataStruct(reverseRecord, undefined, this.version);
     }
-    const variableLengthJumpTableCNT = Math.floor(
-      (originalRecord.length - 1) / 256,
-    );
+    const variableLengthJumpTableCNT = Math.floor((originalRecord.length - 1) / 256);
     reverseRecord = reverseRecord.slice(nullTableLength);
-    let relativeRecordMetadata: ReturnType<
-      typeof parseRelativeObjectMetadataStruct
-    >;
+    let relativeRecordMetadata: ReturnType<typeof parseRelativeObjectMetadataStruct>;
     try {
       relativeRecordMetadata = parseRelativeObjectMetadataStruct(
         reverseRecord,
@@ -493,8 +453,7 @@ class AccessTable {
     }
     if (
       relativeRecordMetadata &&
-      relativeRecordMetadata.variableLengthFieldCount !==
-        this.tableHeader.variableColumns
+      relativeRecordMetadata.variableLengthFieldCount !== this.tableHeader.variableColumns
     ) {
       const tmpBuffer = new Uint8Array(2);
       const tmpDataView = new DataView(tmpBuffer.buffer);
@@ -513,23 +472,16 @@ class AccessTable {
         }
         relativeRecordMetadata.relativeMetadataEnd += metadataStart;
       } else {
-        this.warn(
-          "WARN_DB_RECORD_METADATA_MISMATCH",
-          "Record metadata mismatch",
-          {
-            expectedColumns: this.tableHeader.variableColumns,
-            parsedColumns: relativeRecordMetadata.variableLengthFieldCount,
-          },
-        );
+        this.warn("WARN_DB_RECORD_METADATA_MISMATCH", "Record metadata mismatch", {
+          expectedColumns: this.tableHeader.variableColumns,
+          parsedColumns: relativeRecordMetadata.variableLengthFieldCount,
+        });
         return;
       }
     }
     return relativeRecordMetadata;
   }
-  private parseMemo(
-    relativeObjData: Uint8Array,
-    column: Column,
-  ): string | number | boolean {
+  private parseMemo(relativeObjData: Uint8Array, column: Column): string | number | boolean {
     // console.log(`Parsing memo field ${relativeObjData}`);
     const parsedMemo = MEMO.parse(relativeObjData);
     let memoData: Uint8Array;
@@ -541,16 +493,12 @@ class AccessTable {
     } else if (parsedMemo.memoLength & 0x40000000) {
       // console.log("LVAL type 1");
       const tmp = this.getOverflowRecord(parsedMemo.recordPointer);
-      if (tmp === undefined)
-        throw new Error("LVAL type 1 memoData is undefined");
+      if (tmp === undefined) throw new Error("LVAL type 1 memoData is undefined");
       memoData = tmp;
       memoType = DataType.Text;
     } else {
       // console.log("LVAL type 2");
-      this.warn(
-        "WARN_DB_MEMO_LVAL2_UNSUPPORTED",
-        "Memo LVAL type 2 currently not supported",
-      );
+      this.warn("WARN_DB_MEMO_LVAL2_UNSUPPORTED", "Memo LVAL type 2 currently not supported");
       memoData = relativeObjData;
       memoType = column.type;
     }
@@ -558,9 +506,7 @@ class AccessTable {
   }
   private parseDynamicLengthData(
     originalRecord: Uint8Array,
-    relativeRecordMetadata: ReturnType<
-      typeof parseRelativeObjectMetadataStruct
-    >,
+    relativeRecordMetadata: ReturnType<typeof parseRelativeObjectMetadataStruct>,
     relativeRecordsColumnMap: Dico<Column>,
     nullTable: Array<boolean>,
   ): void {
@@ -586,17 +532,14 @@ class AccessTable {
       }
       let relStart = relativeOffsets[i];
       let relEnd: number;
-      if (i + 1 === relativeOffsets.length)
-        relEnd = relativeRecordMetadata.varLenCount;
+      if (i + 1 === relativeOffsets.length) relEnd = relativeRecordMetadata.varLenCount;
       else relEnd = relativeOffsets[i + 1];
       if (this.version > 3) {
         if (relEnd > originalRecord.length) relEnd = (relEnd & 0xff) >>> 0;
-        if (relStart > originalRecord.length)
-          relStart = (relStart & 0xff) >>> 0;
+        if (relStart > originalRecord.length) relStart = (relStart & 0xff) >>> 0;
       }
       if (relStart === relEnd) {
-        if (this.parsedTable[colName] === undefined)
-          this.parsedTable[colName] = [];
+        if (this.parsedTable[colName] === undefined) this.parsedTable[colName] = [];
         this.parsedTable[colName]!.push("");
         continue;
       }
@@ -617,15 +560,9 @@ class AccessTable {
           parsedType = new TextDecoder("utf-8").decode(relativeObjData);
         }
       } else {
-        parsedType = parseType(
-          column.type,
-          relativeObjData,
-          relativeObjData.length,
-          this.version,
-        );
+        parsedType = parseType(column.type, relativeObjData, relativeObjData.length, this.version);
       }
-      if (this.parsedTable[colName] === undefined)
-        this.parsedTable[colName] = [];
+      if (this.parsedTable[colName] === undefined) this.parsedTable[colName] = [];
       this.parsedTable[colName]!.push(parsedType);
     }
   }
@@ -636,19 +573,11 @@ class AccessTable {
     const nullTableLen = Math.floor((this.tableHeader.columnCount + 7) / 8);
     const nullTable: Array<boolean> = [];
     if (nullTableLen && nullTableLen < originalRecord.length) {
-      const nullTableBuffer = record.slice(
-        nullTableLen === 0 ? 0 : record.length - nullTableLen,
-      );
+      const nullTableBuffer = record.slice(nullTableLen === 0 ? 0 : record.length - nullTableLen);
       for (let i = 0; i < nullTableBuffer.length * 8; ++i)
-        nullTable.push(
-          (nullTableBuffer[Math.floor(i / 8)] &
-            (((1 << i % 8) >>> 0) >>> 0)) !==
-            0,
-        );
+        nullTable.push((nullTableBuffer[Math.floor(i / 8)] & (((1 << (i % 8)) >>> 0) >>> 0)) !== 0);
     } else {
-      throw new Error(
-        `Failed to parse null table column count ${this.tableHeader.columnCount}`,
-      );
+      throw new Error(`Failed to parse null table column count ${this.tableHeader.columnCount}`);
     }
     if (this.version > 3) record = record.slice(2);
     else record = record.slice(1);
@@ -668,12 +597,7 @@ class AccessTable {
         nullTableLen,
       );
       if (metadata === undefined) return;
-      this.parseDynamicLengthData(
-        originalRecord,
-        metadata,
-        relativeRecordsColumnMap,
-        nullTable,
-      );
+      this.parseDynamicLengthData(originalRecord, metadata, relativeRecordsColumnMap, nullTable);
     }
   }
   public parse() {
@@ -681,7 +605,7 @@ class AccessTable {
     for (const dataChunk of this.table.linkedPages) {
       const originalData = dataChunk;
       const parsedData = parseDataPageHeader(originalData, this.version);
-      let lastOffset: number | undefined = undefined;
+      let lastOffset: number | undefined;
       for (const recOffset of parsedData.recordOffsets) {
         if ((recOffset & 0x8000) >>> 0) {
           lastOffset = (recOffset & 0xfff) >>> 0;
@@ -690,10 +614,7 @@ class AccessTable {
         if ((recOffset & 0x4000) >>> 0) {
           const recPtrOffset = (recOffset & 0xfff) >>> 0;
           lastOffset = recPtrOffset;
-          const overflowRecPtrBuffer = originalData.slice(
-            recPtrOffset,
-            recPtrOffset + 4,
-          );
+          const overflowRecPtrBuffer = originalData.slice(recPtrOffset, recPtrOffset + 4);
           const dataView = new DataView(
             overflowRecPtrBuffer.buffer,
             overflowRecPtrBuffer.byteOffset,
@@ -705,11 +626,9 @@ class AccessTable {
             try {
               this.parseRow(record);
             } catch (error) {
-              this.warn(
-                "WARN_DB_ROW_SKIPPED_PARSE_ERROR",
-                "Skipping row due parse error",
-                { message: error instanceof Error ? error.message : String(error) },
-              );
+              this.warn("WARN_DB_ROW_SKIPPED_PARSE_ERROR", "Skipping row due parse error", {
+                message: error instanceof Error ? error.message : String(error),
+              });
             }
           }
           continue;
@@ -722,11 +641,9 @@ class AccessTable {
           try {
             this.parseRow(record);
           } catch (error) {
-            this.warn(
-              "WARN_DB_ROW_SKIPPED_PARSE_ERROR",
-              "Skipping row due parse error",
-              { message: error instanceof Error ? error.message : String(error) },
-            );
+            this.warn("WARN_DB_ROW_SKIPPED_PARSE_ERROR", "Skipping row due parse error", {
+              message: error instanceof Error ? error.message : String(error),
+            });
           }
         }
       }

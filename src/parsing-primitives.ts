@@ -1,13 +1,11 @@
 import { Parser } from "binary-parser";
-import { Version } from "./types";
+import type { Version } from "./types";
 
-Parser.prototype.array = (function (oldArray) {
-  return function (this: any, varName: any, options: any) {
-    if (options.length === 0)
-      return this.setNextParser("array", varName, options);
+Parser.prototype.array = ((oldArray) =>
+  function (this: any, varName: any, options: any) {
+    if (options.length === 0) return this.setNextParser("array", varName, options);
     return oldArray.call(this, varName, options);
-  };
-})(Parser.prototype.array);
+  })(Parser.prototype.array);
 
 export const ACCESSHEADER = new Parser()
   .seek(4)
@@ -59,11 +57,8 @@ export const TDEF_HEADER = new Parser()
   .uint32le("nextPagePtr")
   .saveOffset("headerEnd");
 
-export const parseTableHead = function (
-  buffer: Uint8Array,
-  version: Version = 3,
-) {
-  return new Parser()
+export const parseTableHead = (buffer: Uint8Array, version: Version = 3) =>
+  new Parser()
     .nest("TDEF_header", { type: TDEF_HEADER })
     .uint32le("tableDefinitionLength")
     .uint32le("ver4Unknown")
@@ -88,14 +83,13 @@ export const parseTableHead = function (
     .uint32le("freeSpacePageMap")
     .saveOffset("tDefHeaderEnd")
     .parse(buffer);
-};
 
-export const parseTableData = function (
+export const parseTableData = (
   buffer: Uint8Array,
   realIndexCount: number,
   columnCount: number,
   version: Version = 3,
-) {
+) => {
   const REAL_INDEX = new Parser()
     .uint32le("unk1")
     .uint32le("indexRowCount")
@@ -156,18 +150,14 @@ export const parseTableData = function (
     .seek(version > 3 ? 0 : -4)
     .uint16le("fixedOffset")
     .uint16le("length");
-  const COLUMN_NAMES_V3 = new Parser()
-    .uint8("colNamesLen")
-    .string("colNameStr", {
-      length: "colNamesLen",
-      encoding: "utf8",
-      stripNull: true,
-    });
-  const COLUMN_NAMES_V4 = new Parser()
-    .uint16le("colNamesLen")
-    .buffer("colNameStr", {
-      length: "colNamesLen",
-    });
+  const COLUMN_NAMES_V3 = new Parser().uint8("colNamesLen").string("colNameStr", {
+    length: "colNamesLen",
+    encoding: "utf8",
+    stripNull: true,
+  });
+  const COLUMN_NAMES_V4 = new Parser().uint16le("colNamesLen").buffer("colNameStr", {
+    length: "colNamesLen",
+  });
   const COLUMN_NAMES: typeof COLUMN_NAMES_V3 =
     version === 3 ? COLUMN_NAMES_V3 : (COLUMN_NAMES_V4 as any);
   const res = new Parser()
@@ -193,11 +183,8 @@ export const parseTableData = function (
   return res;
 };
 
-export const parseDataPageHeader = function (
-  buffer: Uint8Array,
-  version: Version = 3,
-) {
-  return new Parser()
+export const parseDataPageHeader = (buffer: Uint8Array, version: Version = 3) =>
+  new Parser()
     .seek(2)
     .uint16le("dataFreeSpace")
     .uint32le("owner")
@@ -209,13 +196,12 @@ export const parseDataPageHeader = function (
       type: "uint16le",
     })
     .parse(buffer);
-};
 
-export const parseRelativeObjectMetadataStruct = function (
+export const parseRelativeObjectMetadataStruct = (
   buffer: Uint8Array,
   variableJumpTablesCNT: number = 0,
   version: Version = 3,
-) {
+) => {
   if (version === 3) {
     return new Parser()
       .uint8("variableLengthFieldCount")

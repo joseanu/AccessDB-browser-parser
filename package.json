@@ -20,14 +20,11 @@
   "author": "Quentin Januel",
   "license": "MIT",
   "dependencies": {
-    "binary-parser": "^2.3.0",
-    "text-decoding": "^1.0.0",
-    "uuid": "^13.0.0"
+    "binary-parser": "^2.3.0"
   },
   "devDependencies": {
     "@types/node": "^25.2.3",
-    "@types/uuid": "^11.0.0",
-    "typescript": "^5.9.3"
+    "typescript": "^6.0.2"
   },
   "repository": {
     "type": "git",

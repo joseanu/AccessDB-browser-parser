@@ -1,4 +1,4 @@
-import { Version, Dico } from "./types";
+import type { Dico, Version } from "./types";
 
 export enum DataType {
   Boolean = 1,
@@ -21,18 +21,14 @@ export enum DataType {
 const TABLE_PAGE_MAGIC = new Uint8Array([0x02, 0x01]);
 const DATA_PAGE_MAGIC = new Uint8Array([0x01, 0x01]);
 
-export const parseType = function (
+export const parseType = (
   dataType: DataType,
   buffer: Uint8Array,
   length?: number,
   version: Version = 3,
-) {
+) => {
   let parsed: number | string | boolean;
-  const dataView = new DataView(
-    buffer.buffer,
-    buffer.byteOffset,
-    buffer.byteLength,
-  );
+  const dataView = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
   switch (dataType) {
     case DataType.Boolean:
       parsed = buffer[0] !== 0;
@@ -53,26 +49,29 @@ export const parseType = function (
     case DataType.Float64:
       parsed = dataView.getFloat64(0, true);
       break;
-    case DataType.Money:
+    case DataType.Money: {
       const low = dataView.getUint32(0, true);
       const high = dataView.getInt32(4, true);
       const combined = low + high * 0x100000000;
       parsed = combined / 10000;
       break;
-    case DataType.DateTime:
+    }
+    case DataType.DateTime: {
       const daysSinceEpoch = dataView.getFloat64(0, true);
       const msPerDay = 24 * 60 * 60 * 1000;
       const accessEpochUtc = Date.UTC(1899, 11, 30, 0, 0, 0, 0);
       const timestamp = accessEpochUtc + daysSinceEpoch * msPerDay;
       parsed = new Date(timestamp).toISOString();
       break;
+    }
     case DataType.Binary:
       parsed = new TextDecoder("utf-8").decode(buffer.subarray(0, length));
       break;
-    case DataType.GUID:
+    case DataType.GUID: {
       const guidBytes = buffer.subarray(0, 16);
       parsed = uuidStringify(guidBytes);
       break;
+    }
     case DataType.Bit96Bytes17:
       parsed = new TextDecoder("utf-8").decode(buffer.subarray(0, 17));
       break;
@@ -90,9 +89,7 @@ export const parseType = function (
       }
       break;
     default:
-      parsed = new TextDecoder("utf-8").decode(
-        buffer.subarray(0, length ?? buffer.length),
-      );
+      parsed = new TextDecoder("utf-8").decode(buffer.subarray(0, length ?? buffer.length));
       break;
   }
   return parsed;
@@ -109,30 +106,23 @@ function uuidStringify(bytes: Uint8Array): string {
   ].join("-");
 }
 
-export const categorizePages = function (
+export const categorizePages = (
   dbData: Uint8Array,
   pageSize: number,
-): [Dico<Uint8Array>, Dico<Uint8Array>, Dico<Uint8Array>] {
+): [Dico<Uint8Array>, Dico<Uint8Array>, Dico<Uint8Array>] => {
   if (dbData.length % pageSize)
     throw new Error(
       `DB is not full or pageSize is wrong. pageSize: ${pageSize} dbData.length: ${dbData.length}`,
     );
   const pages: Dico<Uint8Array> = {};
-  for (let i = 0; i < dbData.length; i += pageSize)
-    pages[i] = dbData.slice(i, i + pageSize);
+  for (let i = 0; i < dbData.length; i += pageSize) pages[i] = dbData.slice(i, i + pageSize);
   const dataPages: Dico<Uint8Array> = {};
   const tableDefs: Dico<Uint8Array> = {};
   for (const page of Object.keys(pages)) {
     const comp1 =
-      compareUint8Arrays(
-        DATA_PAGE_MAGIC,
-        pages[page]!.subarray(0, DATA_PAGE_MAGIC.length),
-      ) === 0;
+      compareUint8Arrays(DATA_PAGE_MAGIC, pages[page]!.subarray(0, DATA_PAGE_MAGIC.length)) === 0;
     const comp2 =
-      compareUint8Arrays(
-        TABLE_PAGE_MAGIC,
-        pages[page]!.subarray(0, TABLE_PAGE_MAGIC.length),
-      ) === 0;
+      compareUint8Arrays(TABLE_PAGE_MAGIC, pages[page]!.subarray(0, TABLE_PAGE_MAGIC.length)) === 0;
     if (comp1) dataPages[page] = pages[page];
     else if (comp2) tableDefs[page] = pages[page];
   }
