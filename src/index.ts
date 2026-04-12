@@ -97,7 +97,9 @@ export class AccessParser {
   private parseFileHeader(): void {
     let head: ReturnType<typeof ACCESSHEADER.parse>;
     try {
-      head = ACCESSHEADER.parse(this.dbData);
+      head = ACCESSHEADER.parse(
+        Buffer.from(this.dbData.buffer, this.dbData.byteOffset, this.dbData.byteLength),
+      );
     } catch {
       throw new Error("Failed to parse DB file header. Check it is a valid file header");
     }
@@ -345,11 +347,15 @@ class AccessTable {
   }
   private mergeTableData(firstPage: number): Uint8Array {
     let table = this.tableDefs[firstPage * this.pageSize]!;
-    let parsedHeader = TDEF_HEADER.parse(table);
+    let parsedHeader = TDEF_HEADER.parse(
+      Buffer.from(table.buffer, table.byteOffset, table.byteLength),
+    );
     let data = table.slice(parsedHeader.headerEnd);
     while (parsedHeader.nextPagePtr) {
       table = this.tableDefs[parsedHeader.nextPagePtr * this.pageSize]!;
-      parsedHeader = TDEF_HEADER.parse(table);
+      parsedHeader = TDEF_HEADER.parse(
+        Buffer.from(table.buffer, table.byteOffset, table.byteLength),
+      );
       data = new Uint8Array([...data, ...table.slice(parsedHeader.headerEnd)]);
     }
     return data;
@@ -483,7 +489,9 @@ class AccessTable {
   }
   private parseMemo(relativeObjData: Uint8Array, column: Column): string | number | boolean {
     // console.log(`Parsing memo field ${relativeObjData}`);
-    const parsedMemo = MEMO.parse(relativeObjData);
+    const parsedMemo = MEMO.parse(
+      Buffer.from(relativeObjData.buffer, relativeObjData.byteOffset, relativeObjData.byteLength),
+    );
     let memoData: Uint8Array;
     let memoType: DataType;
     if (parsedMemo.memoLength & 0x80000000) {

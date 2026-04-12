@@ -1,6 +1,16 @@
 import { Parser } from "binary-parser";
 import type { Version } from "./types";
 
+type ParserWithSaveOffset = Parser & {
+  saveOffset(varName: string): ParserWithSaveOffset;
+};
+
+const withSaveOffset = (parser: any): ParserWithSaveOffset =>
+  parser as unknown as ParserWithSaveOffset;
+
+const toBuffer = (buffer: Uint8Array): Buffer =>
+  Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+
 Parser.prototype.array = ((oldArray) =>
   function (this: any, varName: any, options: any) {
     if (options.length === 0) return this.setNextParser("array", varName, options);
@@ -15,11 +25,12 @@ export const ACCESSHEADER = new Parser()
   .uint32le("jetVersion")
   .seek(126);
 
-export const MEMO = new Parser()
+export const MEMO: any = withSaveOffset(
+  new Parser()
   .uint32le("memoLength")
   .uint32le("recordPointer")
   .uint32le("memoUnknown")
-  .saveOffset("memoEnd");
+).saveOffset("memoEnd");
 
 const VERSION_3_FLAGS = new Parser()
   .bit1("hyperlink")
@@ -49,16 +60,18 @@ const VERSION_4_FLAGS = new Parser()
   .bit1("unk8")
   .bit1("compressedUnicode");
 
-export const TDEF_HEADER = new Parser()
+export const TDEF_HEADER: any = withSaveOffset(
+  new Parser()
   .seek(2)
   .uint16le("peekVersion")
   .seek(-2)
   .uint16le("tdefVer")
   .uint32le("nextPagePtr")
-  .saveOffset("headerEnd");
+).saveOffset("headerEnd");
 
-export const parseTableHead = (buffer: Uint8Array, version: Version = 3) =>
-  new Parser()
+export const parseTableHead = (buffer: Uint8Array, version: Version = 3): any =>
+  withSaveOffset(
+    new Parser()
     .nest("TDEF_header", { type: TDEF_HEADER })
     .uint32le("tableDefinitionLength")
     .uint32le("ver4Unknown")
@@ -81,8 +94,9 @@ export const parseTableHead = (buffer: Uint8Array, version: Version = 3) =>
     .uint32le("realIndexCount")
     .uint32le("rowPageMap")
     .uint32le("freeSpacePageMap")
+  )
     .saveOffset("tDefHeaderEnd")
-    .parse(buffer);
+    .parse(toBuffer(buffer));
 
 export const parseTableData = (
   buffer: Uint8Array,
@@ -173,11 +187,13 @@ export const parseTableData = (
       length: columnCount,
       type: COLUMN_NAMES,
     })
-    .parse(buffer);
+    .parse(toBuffer(buffer));
   if (version !== 3) {
     for (const columnName of res.columnNames) {
-      const buffer = columnName.colNameStr as Uint8Array;
-      columnName.colNameStr = new TextDecoder("utf-16le").decode(buffer);
+      const rawValue = columnName.colNameStr;
+      if (typeof rawValue !== "string") {
+        columnName.colNameStr = new TextDecoder("utf-16le").decode(rawValue);
+      }
     }
   }
   return res;
@@ -195,46 +211,53 @@ export const parseDataPageHeader = (buffer: Uint8Array, version: Version = 3) =>
       length: "recordCount",
       type: "uint16le",
     })
-    .parse(buffer);
+    .parse(toBuffer(buffer));
 
 export const parseRelativeObjectMetadataStruct = (
   buffer: Uint8Array,
   variableJumpTablesCNT: number = 0,
   version: Version = 3,
-) => {
+): any => {
   if (version === 3) {
-    return new Parser()
+    return withSaveOffset(
+      new Parser()
       .uint8("variableLengthFieldCount")
       .array("variableLengthJumpTable", {
         length: variableJumpTablesCNT,
         type: "uint8",
       })
       .array("variableLengthFieldOffsets", {
-        length: function (this: { variableLengthFieldCount: number }) {
-          return this.variableLengthFieldCount;
+        length: function (this: Parser) {
+          const current = this as unknown as { variableLengthFieldCount: number };
+          return current.variableLengthFieldCount;
         },
         type: "uint8",
       })
       .uint8("varLenCount")
+    )
       .saveOffset("relativeMetadataEnd")
-      .parse(buffer);
+      .parse(toBuffer(buffer));
   } else {
-    const part1 = new Parser()
+    const part1: any = withSaveOffset(
+      new Parser()
       .uint16le("variableLengthFieldCount")
       .array("variableLengthJumpTable", {
         length: variableJumpTablesCNT,
         type: "uint8",
       })
+    )
       .saveOffset("part2StartOffset")
-      .parse(buffer);
-    const part2 = new Parser()
+      .parse(toBuffer(buffer));
+    const part2 = withSaveOffset(
+      new Parser()
       .array("variableLengthFieldOffsets", {
         length: (part1.variableLengthFieldCount & 0xff) >>> 0,
         type: "uint16le",
       })
       .uint16le("varLenCount")
+    )
       .saveOffset("relativeMetadataEnd")
-      .parse(buffer.slice(part1.part2StartOffset));
+      .parse(toBuffer(buffer.slice(part1.part2StartOffset)));
     const result = { ...part1, ...part2 };
     return result;
   }
