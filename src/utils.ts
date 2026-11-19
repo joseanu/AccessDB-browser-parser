@@ -20,13 +20,90 @@ export enum DataType {
 
 const TABLE_PAGE_MAGIC = new Uint8Array([0x02, 0x01]);
 const DATA_PAGE_MAGIC = new Uint8Array([0x01, 0x01]);
+const ACCESS_EPOCH = Date.UTC(1899, 11, 30);
+const MILLISECONDS_PER_DAY = 86_400_000;
+const UTF8 = new TextDecoder("utf-8", { fatal: true });
+const UTF16LE = new TextDecoder("utf-16le");
+const UTF16BE = new TextDecoder("utf-16be");
 
-export const parseType = (
+function decodeLegacyText(bytes: Uint8Array): string {
+  try {
+    return UTF8.decode(bytes);
+  } catch {
+    // The browser's "latin1" decoder actually uses Windows-1252.
+    return Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
+  }
+}
+
+function decodeAccessText(bytes: Uint8Array, version: Version): string {
+  if (version === 3) return decodeLegacyText(bytes);
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return UTF16BE.decode(bytes);
+  if (bytes[0] !== 0xff || bytes[1] !== 0xfe) return UTF16LE.decode(bytes);
+
+  // A zero byte switches between compressed and uncompressed segments.
+  const expanded = new Uint8Array((bytes.length - 2) * 2);
+  let compressed = true;
+  let length = 0;
+  for (const byte of bytes.subarray(2)) {
+    if (byte === 0) {
+      compressed = !compressed;
+      continue;
+    }
+    expanded[length++] = byte;
+    if (compressed) expanded[length++] = 0;
+  }
+  return UTF16LE.decode(expanded.subarray(0, length));
+}
+
+function decodeNumeric(bytes: Uint8Array, scale: number): string {
+  if (bytes.length !== 17) throw new RangeError("Access Numeric values require 17 bytes");
+  if (!Number.isInteger(scale) || scale < 0 || scale > 28) {
+    throw new RangeError("Invalid Access Numeric scale");
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let magnitude = BigInt(0);
+  // Each 32-bit word is little-endian, in descending significance.
+  for (let offset = 1; offset < 17; offset += 4) {
+    magnitude = (magnitude << BigInt(32)) + BigInt(view.getUint32(offset, true));
+  }
+  const digits = magnitude.toString().padStart(scale + 1, "0");
+  const sign = bytes[0] && magnitude !== BigInt(0) ? "-" : "";
+  return scale === 0 ? sign + digits : sign + digits.slice(0, -scale) + "." + digits.slice(-scale);
+}
+
+export function parseType(
+  dataType: DataType.OLE,
+  buffer: Uint8Array,
+  length?: number,
+  version?: Version,
+): Uint8Array;
+export function parseType(
+  dataType: DataType.Text,
+  buffer: Uint8Array,
+  length?: number,
+  version?: Version,
+): string;
+export function parseType(
+  dataType: Exclude<DataType, DataType.OLE>,
+  buffer: Uint8Array,
+  length?: number,
+  version?: Version,
+  numericScale?: number,
+): string | number | boolean;
+export function parseType(
+  dataType: DataType,
+  buffer: Uint8Array,
+  length?: number,
+  version?: Version,
+  numericScale?: number,
+): string | number | boolean | Uint8Array;
+export function parseType(
   dataType: DataType,
   buffer: Uint8Array,
   length?: number,
   version: Version = 3,
-) => {
+  numericScale = 6,
+): string | number | boolean | Uint8Array {
   let parsed: number | string | boolean;
   const dataView = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
   switch (dataType) {
@@ -58,42 +135,33 @@ export const parseType = (
     }
     case DataType.DateTime: {
       const daysSinceEpoch = dataView.getFloat64(0, true);
-      const msPerDay = 24 * 60 * 60 * 1000;
-      const accessEpochUtc = Date.UTC(1899, 11, 30, 0, 0, 0, 0);
-      const timestamp = accessEpochUtc + daysSinceEpoch * msPerDay;
-      parsed = new Date(timestamp).toISOString();
+      const date = new Date(ACCESS_EPOCH + daysSinceEpoch * MILLISECONDS_PER_DAY);
+      const year = date.getUTCFullYear();
+      parsed = year >= 1 && year <= 9999 ? date.toISOString() : "(Invalid Date)";
       break;
     }
     case DataType.Binary:
       parsed = new TextDecoder("utf-8").decode(buffer.subarray(0, length));
       break;
+    case DataType.OLE:
+      return new Uint8Array(buffer.subarray(0, length));
     case DataType.GUID: {
       const guidBytes = buffer.subarray(0, 16);
       parsed = uuidStringify(guidBytes);
       break;
     }
     case DataType.Bit96Bytes17:
-      parsed = new TextDecoder("utf-8").decode(buffer.subarray(0, 17));
+      parsed = decodeNumeric(buffer.subarray(0, length), numericScale);
       break;
     case DataType.Text:
-      if (version > 3) {
-        const first = buffer[0] === 0xfe && buffer[1] === 0xff;
-        const second = buffer[0] === 0xff && buffer[1] === 0xfe;
-        if (first || second) {
-          parsed = new TextDecoder("windows-1252").decode(buffer.subarray(2));
-        } else {
-          parsed = new TextDecoder("utf-16le").decode(buffer);
-        }
-      } else {
-        parsed = new TextDecoder("utf-8").decode(buffer);
-      }
+      parsed = decodeAccessText(buffer, version).replace(/\u0000/g, "");
       break;
     default:
       parsed = new TextDecoder("utf-8").decode(buffer.subarray(0, length ?? buffer.length));
       break;
   }
   return parsed;
-};
+}
 
 function uuidStringify(bytes: Uint8Array): string {
   const hex = Array.from(bytes).map((b) => ("00" + b.toString(16)).slice(-2));

@@ -1,5 +1,6 @@
 import { AccessTable, TableObject } from "./access-table";
 import { ACCESSHEADER, parseTableHead } from "./parsing-primitives";
+import { readColumnFormats } from "./properties";
 import type {
   AccessParserError,
   AccessParserLogLevel,
@@ -27,7 +28,6 @@ enum ALL_VERSIONS {
 }
 const NEW_VERSIONS = [VERSION_4, VERSION_5, VERSION_2010];
 
-const SYSTEM_TABLE_FLAGS = [-0x80000000, -0x00000002, 0x80000000, 0x00000002];
 type Line = {
   data: {
     [s: string]: any;
@@ -45,6 +45,7 @@ export class AccessParser {
   private version = ALL_VERSIONS.VERSION_3;
   private pageSize = PAGE_SIZE_V3;
   private catalog: Dico<number>;
+  private moneyFormats = new Map<number, ReadonlyMap<string, string>>();
   private logLevel: AccessParserLogLevel;
   private onWarning?: (warning: AccessParserWarning) => void;
   private onError?: (error: AccessParserError) => void;
@@ -55,7 +56,7 @@ export class AccessParser {
     this.onError = options.onError;
     this.parseFileHeader();
     [this.tableDefs, this.dataPages] = categorizePages(this.dbData, this.pageSize);
-    this.catalog = this.parseCatalog();
+    this.catalog = this.parseCatalog(options.formatMoney === true);
   }
   private error(code: string, message: string, error?: unknown, meta?: unknown) {
     if (this.onError) this.onError({ code, message, error, meta });
@@ -69,9 +70,7 @@ export class AccessParser {
   private parseFileHeader(): void {
     let head: ReturnType<typeof ACCESSHEADER.parse>;
     try {
-      head = ACCESSHEADER.parse(
-        Buffer.from(this.dbData.buffer, this.dbData.byteOffset, this.dbData.byteLength),
-      );
+      head = ACCESSHEADER.parse(this.dbData);
     } catch {
       throw new Error("Failed to parse DB file header. Check it is a valid file header");
     }
@@ -119,44 +118,33 @@ export class AccessParser {
     this.tablesWithData[offset] = table;
     return table;
   }
-  private parseCatalog() {
-    const catalogPage = this.getTableObject(2, "MSysObjects");
-    const accessTable = new AccessTable(
-      catalogPage,
-      this.version,
-      this.pageSize,
-      this.dataPages,
-      this.tableDefs,
-      this.logLevel,
-      this.onWarning,
-      this.onError,
-    );
-    const catalog = accessTable.parse();
-    const tablesMapping: Dico<number> = {};
-    let i = -1;
-    const names: Array<string> = catalog["Name"] as any;
-    const types: Array<number> = catalog["Type"] as any;
-    const flags: Array<number> = catalog["Flags"] as any;
-    const ids: Array<number> = catalog["Id"] as any;
+  private parseCatalog(formatMoney: boolean) {
+    const catalog = this.openTable(this.getTableObject(2, "MSysObjects")).parse();
+    const tablesMapping: Dico<number> = Object.create(null);
+    const { Name: names, Type: types, Flags: flags, Id: ids, LvProp: properties } = catalog;
     if (names === undefined || types === undefined || flags === undefined || ids === undefined)
       throw new Error("The catalog is missing required fields");
-    for (const tableName of names) {
-      if (typeof tableName !== "string") continue;
-      i += 1;
+    for (const [i, tableName] of names.entries()) {
+      const id = ids[i];
+      const flag = flags[i];
       const tableType = 1;
-      if (types[i] === tableType) {
-        if (!SYSTEM_TABLE_FLAGS.includes(flags[i]) && flags[i] === 0) {
-          tablesMapping[tableName] = ids[i];
-        }
+      if (
+        typeof tableName !== "string" ||
+        typeof id !== "number" ||
+        flag !== 0 ||
+        types[i] !== tableType
+      )
+        continue;
+      tablesMapping[tableName] = id;
+      const lvProp = properties?.[i];
+      if (formatMoney && lvProp instanceof Uint8Array) {
+        this.moneyFormats.set(id, readColumnFormats(lvProp, this.version));
       }
     }
     return tablesMapping;
   }
-  private parseTableUnformatted(tableName: string) {
-    const tablePage = this.catalog[tableName];
-    if (tablePage === undefined) throw new Error(`Could not find table ${tableName} in Database`);
-    const table = this.getTableObject(tablePage, tableName);
-    const accessTable = new AccessTable(
+  private openTable(table: TableObject, moneyFormats?: ReadonlyMap<string, string>) {
+    return new AccessTable(
       table,
       this.version,
       this.pageSize,
@@ -165,11 +153,20 @@ export class AccessParser {
       this.logLevel,
       this.onWarning,
       this.onError,
+      moneyFormats,
     );
-    return accessTable.parse();
+  }
+  private getTablePage(tableName: string): number {
+    const page = this.catalog[tableName];
+    if (page === undefined) throw new Error(`Could not find table ${tableName} in Database`);
+    return page;
   }
   public parseTable(name: string): Table {
-    const table = this.parseTableUnformatted(name);
+    const page = this.getTablePage(name);
+    const table = this.openTable(
+      this.getTableObject(page, name),
+      this.moneyFormats.get(page),
+    ).parse();
     const fields = Object.keys(table);
     if (fields.length === 0) {
       return [];
@@ -177,13 +174,18 @@ export class AccessParser {
     const linesNumber = table[fields[0]]!.length;
     const lines: Array<Line> = [];
     for (let i = 0; i < linesNumber; ++i) {
-      const line: any = {};
-      for (const field of fields) {
-        line[field] = table[field]![i];
-      }
+      const line = Object.fromEntries(fields.map((field) => [field, table[field]![i]]));
       lines.push({ data: line, rowNumber: i + 1 });
     }
     return lines;
+  }
+  public getPrimaryKeys(tableName: string): string[] {
+    const page = this.getTablePage(tableName);
+    const offset = page * this.pageSize;
+    const definition = this.tableDefs[offset];
+    if (definition === undefined)
+      throw new Error(`Could not find table ${tableName} at definition page ${page}`);
+    return this.openTable(new TableObject(offset, definition)).getPrimaryKeys();
   }
   public getTables(): string[] {
     return Object.keys(this.catalog);
@@ -192,4 +194,3 @@ export class AccessParser {
     return this.version;
   }
 }
-

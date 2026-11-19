@@ -4,13 +4,16 @@ import {
   parseRelativeObjectMetadataStruct,
   parseTableData,
   parseTableHead,
+  readPrimaryKeyColumnIds,
   TDEF_HEADER,
 } from "./parsing-primitives";
+import { formatCurrency } from "./properties";
 import type {
   AccessParserError,
   AccessParserLogLevel,
   AccessParserWarning,
   AccessParserWarningCode,
+  AccessValue,
   Dico,
   Version,
 } from "./types";
@@ -45,9 +48,9 @@ export class AccessTable {
   private dataPages: Dico<Uint8Array>;
   private tableDefs: Dico<Uint8Array>;
   private table: TableObject;
-  private parsedTable: Dico<Array<string | number | boolean | null>>;
-  private columns: Dico<Column>;
+  private columns: Column[];
   private tableHeader: TableHeader;
+  private indexDefinitions: Uint8Array;
   private logLevel: AccessParserLogLevel;
   private onWarning?: (warning: AccessParserWarning) => void;
   private onError?: (error: AccessParserError) => void;
@@ -62,6 +65,7 @@ export class AccessTable {
     logLevel: AccessParserLogLevel,
     onWarning?: (warning: AccessParserWarning) => void,
     onError?: (error: AccessParserError) => void,
+    private moneyFormats?: ReadonlyMap<string, string>,
   ) {
     this.version = version;
     this.pageSize = pageSize;
@@ -73,8 +77,7 @@ export class AccessTable {
     this.onError = onError;
     this.warningCountsBySignature = new Map<string, number>();
     this.warningTotalsByCode = new Map<AccessParserWarningCode, number>();
-    this.parsedTable = {};
-    [this.columns, this.tableHeader] = this.getTableColumns();
+    [this.columns, this.tableHeader, this.indexDefinitions] = this.getTableColumns();
   }
   private shouldLog(level: "error" | "warn" | "info"): boolean {
     return LOG_LEVEL_RANK[this.logLevel] >= LOG_LEVEL_RANK[level];
@@ -116,10 +119,11 @@ export class AccessTable {
       console.warn(`[${code}] x${total}`);
     }
   }
-  private getTableColumns(): [Dico<Column>, TableHeader] {
+  private getTableColumns(): [Column[], TableHeader, Uint8Array] {
     let tableHeader: TableHeader;
     let colNames: PropType<ReturnType<typeof parseTableData>, "columnNames">;
     let columns: Array<Column>;
+    let indexDefinitions: Uint8Array;
     try {
       tableHeader = parseTableHead(this.table.value, this.version);
       let mergedData = this.table.value.slice(tableHeader.tDefHeaderEnd);
@@ -137,49 +141,48 @@ export class AccessTable {
       );
       columns = parsedData.column as any;
       colNames = parsedData.columnNames;
+      indexDefinitions = mergedData.subarray(parsedData.columnMetadataEnd);
     } catch (err) {
       throw new Error(`Failed to parse table header`);
     }
     columns.forEach((c, i) => {
       c.colNameStr = colNames[i].colNameStr;
     });
-    const offset = Math.min(...columns.map((c) => c.columnIndex));
-    const columnDict: Dico<Column> = {};
-    for (const x of columns) columnDict[x.columnIndex - offset] = x;
-    if (Object.keys(columnDict).length !== columns.length) {
-      for (const x of columns) columnDict[x.columnID] = x;
+    if (new Set(columns.map((column) => column.columnID)).size !== columns.length) {
+      throw new Error("Duplicate column IDs in Access table definition");
     }
-    if (Object.keys(columnDict).length !== tableHeader.columnCount)
-      throw new Error(
-        `Expected ${tableHeader.columnCount} columns got ${Object.keys(columnDict).length}`,
-      );
-    return [columnDict, tableHeader];
+    const uniqueIndexes =
+      new Set(columns.map((column) => column.columnIndex)).size === columns.length;
+    columns.sort((a, b) =>
+      uniqueIndexes ? a.columnIndex - b.columnIndex : a.columnID - b.columnID,
+    );
+    return [columns, tableHeader, indexDefinitions];
+  }
+  public getPrimaryKeys(): string[] {
+    const ids = readPrimaryKeyColumnIds(
+      this.indexDefinitions,
+      this.tableHeader.indexCount,
+      this.tableHeader.realIndexCount,
+      this.version,
+    );
+    return ids.map((id) => {
+      const column = this.columns.find((column) => column.columnID === id);
+      if (!column) throw new Error(`Primary key references unknown Access column ${id}`);
+      return column.colNameStr;
+    });
   }
   private mergeTableData(firstPage: number): Uint8Array {
     let table = this.tableDefs[firstPage * this.pageSize]!;
-    let parsedHeader = TDEF_HEADER.parse(
-      Buffer.from(table.buffer, table.byteOffset, table.byteLength),
-    );
+    let parsedHeader = TDEF_HEADER.parse(table);
     let data = table.slice(parsedHeader.headerEnd);
     while (parsedHeader.nextPagePtr) {
       table = this.tableDefs[parsedHeader.nextPagePtr * this.pageSize]!;
-      parsedHeader = TDEF_HEADER.parse(
-        Buffer.from(table.buffer, table.byteOffset, table.byteLength),
-      );
+      parsedHeader = TDEF_HEADER.parse(table);
       data = new Uint8Array([...data, ...table.slice(parsedHeader.headerEnd)]);
     }
     return data;
   }
-  private createEmptyTable() {
-    const parsedTable: Dico<Array<string | number | boolean>> = {};
-    const [columns] = this.getTableColumns();
-    for (const i of Object.keys(columns)) {
-      const column = columns[i]!;
-      parsedTable[column.colNameStr] = [];
-    }
-    return parsedTable;
-  }
-  private getOverflowRecord(recordPointer: number): Uint8Array | undefined {
+  private getOverflowRecord(recordPointer: number, longValue = false): Uint8Array | undefined {
     const recordOffset = (recordPointer & 0xff) >>> 0;
     const pageNum = recordPointer >>> 8;
     const recordPage = this.dataPages[pageNum * this.pageSize];
@@ -187,311 +190,199 @@ export class AccessTable {
     const parsedData = parseDataPageHeader(recordPage, this.version);
     if (recordOffset >= parsedData.recordOffsets.length) return;
     const recordOffsetMask = this.pageSize * 2 - 1;
-    let start = parsedData.recordOffsets[recordOffset];
-    if ((start & 0x8000) >>> 0) start = (start & recordOffsetMask) >>> 0;
-    else
+    const rawStart = parsedData.recordOffsets[recordOffset];
+    const start = rawStart & recordOffsetMask;
+    const end =
+      recordOffset === 0
+        ? recordPage.length
+        : parsedData.recordOffsets[recordOffset - 1] & recordOffsetMask;
+    const directoryEnd = (this.version === 3 ? 10 : 14) + 2 * parsedData.recordOffsets.length;
+    if (start < directoryEnd || start >= end || end > recordPage.length) return;
+    if (!longValue && (rawStart & 0x8000) === 0) {
       this.warn("WARN_DB_OVERFLOW_FLAG_MISSING", "Overflow record flag is not present", {
         start,
         recordOffset,
         pageNum,
       });
-    let record: Uint8Array;
-    if (recordOffset === 0) {
-      record = recordPage.slice(start);
-    } else {
-      let end: number | undefined;
-      for (let index = recordOffset - 1; index >= 0; index -= 1) {
-        const previousOffset = parsedData.recordOffsets[index]!;
-        if ((previousOffset & 0x4000) === 0) {
-          end = previousOffset & recordOffsetMask;
-          break;
-        }
-      }
-      record = end === undefined ? recordPage.slice(start) : recordPage.slice(start, end);
     }
-    return record;
+    return recordPage.subarray(start, end);
   }
-  private parseFixedLengthData(
-    originalRecord: Uint8Array,
-    column: Column,
-    nullTable: Array<boolean>,
-  ) {
-    const columnName = column.colNameStr;
-    if (column.columnID >= nullTable.length)
-      throw new Error(
-        `Failed to parse field, column not found in nullTable column: ${columnName}, column id: ${column.columnID}, nullTable: ${nullTable}`,
-      );
+  private readVariableOffsets(record: Uint8Array, bitmapStart: number): number[] {
+    const view = new DataView(record.buffer, record.byteOffset, record.byteLength);
+    const jet3 = this.version === 3;
+    const count = jet3 ? view.getUint8(bitmapStart - 1) : view.getUint16(bitmapStart - 2, true);
+    if (count > this.tableHeader.variableColumns) {
+      throw new Error(`Variable-length field count ${count} exceeds the table definition`);
+    }
 
-    if (this.parsedTable[columnName] === undefined) this.parsedTable[columnName] = [];
+    const jumpSlots = jet3 ? Math.floor((record.length - 1) / 256) : 0;
+    const width = jet3 ? 1 : 2;
+    const offsetTableStart = bitmapStart - (count + 2) * width - jumpSlots;
+    if (offsetTableStart < width) throw new Error("Variable-length metadata is outside the row");
 
-    let parsedType: boolean | string | number | null;
-
-    if (column.type === DataType.Boolean) {
-      if (column.columnID >= nullTable.length)
-        throw new Error(
-          `Failed to parse bool field, Column not found in nullTable column: ${columnName}, column id: ${column.columnID}, nullTable: ${nullTable}`,
-        );
-      parsedType = nullTable[column.columnID];
+    const offsets: number[] = [];
+    if (jet3) {
+      const reversed = new Uint8Array(record.subarray(offsetTableStart, bitmapStart)).reverse();
+      const { variableLengthFieldOffsets, variableLengthJumpTable, varLenCount } =
+        parseRelativeObjectMetadataStruct(reversed, jumpSlots, this.version);
+      // A row can cross a 256-byte boundary entirely within its metadata.
+      const jumpCount = Math.min(jumpSlots, Math.floor(offsetTableStart / 256));
+      let jumps = 0;
+      const lowOffsets = [...variableLengthFieldOffsets, varLenCount];
+      for (const [index, lowOffset] of lowOffsets.entries()) {
+        while (jumps < jumpCount && variableLengthJumpTable[jumps] === index) jumps += 1;
+        offsets.push(lowOffset + jumps * 256);
+      }
     } else {
-      if (column.columnID >= nullTable.length)
-        throw new Error(
-          `Failed to parse field, column not found in nullTable column: ${columnName}, column id: ${column.columnID}, nullTable: ${nullTable}`,
-        );
-      if (nullTable[column.columnID] === false) {
-        parsedType = null;
-      } else {
-        if (column.fixedOffset >= originalRecord.length)
-          throw new Error(
-            `Column offset is bigger than the length of the record ${column.fixedOffset}`,
-          );
-        const record = originalRecord.slice(column.fixedOffset);
-        parsedType = parseType(column.type, record, undefined, this.version);
+      for (let index = 0; index <= count; index += 1) {
+        offsets.push(view.getUint16(bitmapStart - 4 - 2 * index, true));
       }
     }
-    this.parsedTable[columnName]!.push(parsedType);
+
+    let previous = width;
+    for (const offset of offsets) {
+      if (offset < previous || offset > offsetTableStart) {
+        throw new Error("Variable-length field offset is outside the row data");
+      }
+      previous = offset;
+    }
+    return offsets;
   }
-  private parseDynamicLengthRecordsMetadata(
-    reverseRecord: Uint8Array,
-    originalRecord: Uint8Array,
-    nullTableLength: number,
-  ) {
-    if (this.version > 3) {
-      const recordView = new DataView(
-        originalRecord.buffer,
-        originalRecord.byteOffset,
-        originalRecord.byteLength,
-      );
-      const trailerEnd = originalRecord.length - nullTableLength;
-      const countOffset = trailerEnd - 2;
-      if (countOffset < 0) {
-        throw new Error("Jet4 record is too short for variable-length field count");
-      }
 
-      const variableLengthFieldCount = recordView.getUint16(countOffset, true);
-      if (variableLengthFieldCount > this.tableHeader.variableColumns) {
-        throw new Error(
-          `Jet4 variable-length field count exceeds table definition: expected at most ${this.tableHeader.variableColumns}, got ${variableLengthFieldCount}`,
+  private readLongValue(field: Uint8Array, column: string): Uint8Array {
+    const { memoLength, recordPointer, memoEnd } = MEMO.parse(field);
+    const length = memoLength & 0x3fffffff;
+    const kind = memoLength >>> 30;
+    if (kind === 2 || kind === 1) {
+      const payload =
+        kind === 2 ? field.subarray(memoEnd) : this.getOverflowRecord(recordPointer, true);
+      if (!payload) throw new Error("Missing long-value record");
+      if (payload.length < length) {
+        this.warn(
+          "WARN_DB_LONG_VALUE_TRUNCATED",
+          "Long value is shorter than its declared length",
+          {
+            column,
+            expected: length,
+            actual: payload.length,
+          },
         );
       }
+      return new Uint8Array(payload.subarray(0, length));
+    }
+    if (kind !== 0) throw new Error("Invalid long-value flags");
 
-      const terminalOffsetPosition = trailerEnd - 4 - 2 * variableLengthFieldCount;
-      if (terminalOffsetPosition < 0 || terminalOffsetPosition + 2 > countOffset) {
-        throw new Error("Jet4 variable-length metadata is outside the record bounds");
+    const chunks: Uint8Array[] = [];
+    const visited = new Set<number>();
+    let pointer = recordPointer;
+    let total = 0;
+    while (total < length) {
+      if (pointer === 0 || visited.has(pointer)) {
+        throw new Error("Invalid long-value chain");
       }
-
-      const variableLengthFieldOffsets = Array.from(
-        { length: variableLengthFieldCount },
-        (_, index) => recordView.getUint16(trailerEnd - 4 - 2 * index, true),
+      visited.add(pointer);
+      const record = this.getOverflowRecord(pointer, true);
+      if (!record || record.length <= 4) throw new Error("Missing long-value chain record");
+      const chunk = record.subarray(4, 4 + length - total);
+      chunks.push(chunk);
+      total += chunk.length;
+      pointer = new DataView(record.buffer, record.byteOffset, record.byteLength).getUint32(
+        0,
+        true,
       );
-      const varLenCount = recordView.getUint16(terminalOffsetPosition, true);
-      if (varLenCount > terminalOffsetPosition) {
-        throw new Error(
-          `Jet4 variable-length data end ${varLenCount} overlaps metadata at ${terminalOffsetPosition}`,
+    }
+    const result = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      result.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return result;
+  }
+
+  private parseField(column: Column, data: Uint8Array): AccessValue {
+    if (column.type === DataType.Memo || column.type === DataType.OLE) {
+      if (data.length === 0) return column.type === DataType.OLE ? new Uint8Array() : "";
+      try {
+        const payload = this.readLongValue(data, column.colNameStr);
+        return column.type === DataType.OLE
+          ? payload
+          : parseType(DataType.Text, payload, payload.length, this.version);
+      } catch {
+        this.warn(
+          "WARN_DB_MEMO_FALLBACK_TO_BYTES",
+          "Failed to read long value. Using the stored field",
+          {
+            column: column.colNameStr,
+          },
         );
+        return column.type === DataType.OLE
+          ? new Uint8Array(data)
+          : new TextDecoder("utf-8").decode(data);
+      }
+    }
+    if (data.length === 0 && !column.columnFlags.fixedLength) return "";
+    if (column.type === DataType.Bit96Bytes17 && data.length !== 17) {
+      this.warn("WARN_DB_NUMERIC_INVALID_LENGTH", "Invalid Numeric length. Using the stored bytes", {
+        column: column.colNameStr,
+        actual: data.length,
+      });
+      return new Uint8Array(data);
+    }
+    const value = parseType(column.type, data, data.length, this.version, column.various?.scale);
+    if (column.type === DataType.Money && typeof value === "number") {
+      return formatCurrency(value, this.moneyFormats?.get(column.colNameStr));
+    }
+    return value;
+  }
+
+  private parseRow(record: Uint8Array): AccessValue[] {
+    const width = this.version === 3 ? 1 : 2;
+    const view = new DataView(record.buffer, record.byteOffset, record.byteLength);
+    const columnCount = width === 1 ? view.getUint8(0) : view.getUint16(0, true);
+    const bitmapStart = record.length - Math.ceil(columnCount / 8);
+    if (bitmapStart < width) throw new Error("Null bitmap is outside the row");
+
+    let offsets: number[] | undefined;
+    return this.columns.map((column) => {
+      const id = column.columnID;
+      const hasValue =
+        id < columnCount && (record[bitmapStart + (id >>> 3)] & (1 << (id & 7))) !== 0;
+      if (column.type === DataType.Boolean) return hasValue;
+      if (!hasValue) return null;
+
+      if (column.columnFlags.fixedLength) {
+        const start = width + column.fixedOffset;
+        const end = start + column.length;
+        if (end > bitmapStart)
+          throw new Error(`Fixed-length field ${column.colNameStr} is outside the row`);
+        return this.parseField(column, record.subarray(start, end));
       }
 
-      let previousOffset = 0;
-      for (const [index, offset] of variableLengthFieldOffsets.entries()) {
-        if (offset < previousOffset || offset > varLenCount) {
-          throw new Error(
-            `Jet4 variable-length field offset ${index} is outside the record data bounds`,
-          );
-        }
-        previousOffset = offset;
+      offsets ??= this.readVariableOffsets(record, bitmapStart);
+      const index = column.variableColumnNumber;
+      if (index + 1 >= offsets.length) {
+        throw new Error(`Variable-length field ${column.colNameStr} has no row offset`);
       }
+      return this.parseField(column, record.subarray(offsets[index], offsets[index + 1]));
+    });
+  }
 
-      return {
-        variableLengthFieldCount,
-        variableLengthJumpTable: [],
-        variableLengthFieldOffsets,
-        varLenCount,
-        relativeMetadataEnd: trailerEnd,
-      };
-    }
-    const variableLengthJumpTableCNT = Math.floor((originalRecord.length - 1) / 256);
-    reverseRecord = reverseRecord.slice(nullTableLength);
-    let relativeRecordMetadata: ReturnType<typeof parseRelativeObjectMetadataStruct>;
-    try {
-      relativeRecordMetadata = parseRelativeObjectMetadataStruct(
-        reverseRecord,
-        variableLengthJumpTableCNT,
-        this.version,
-      );
-      relativeRecordMetadata.relativeMetadataEnd += nullTableLength;
-    } catch {
-      throw new Error("Failed parsing record");
-    }
-    if (
-      relativeRecordMetadata &&
-      relativeRecordMetadata.variableLengthFieldCount !== this.tableHeader.variableColumns
-    ) {
-      const tmpBuffer = new Uint8Array(2);
-      const tmpDataView = new DataView(tmpBuffer.buffer);
-      tmpDataView.setUint16(0, this.tableHeader.variableColumns, true);
-      const metadataStart = reverseRecord.indexOf(tmpBuffer[0]);
-      if (metadataStart !== 1 && metadataStart < 10) {
-        reverseRecord = reverseRecord.slice(metadataStart);
-        try {
-          relativeRecordMetadata = parseRelativeObjectMetadataStruct(
-            reverseRecord,
-            variableLengthJumpTableCNT,
-            this.version,
-          );
-        } catch {
-          throw new Error(`Failed to parse record metadata: ${originalRecord}`);
+  public parse(): Dico<AccessValue[]> {
+    const parsedTable: Dico<AccessValue[]> = Object.create(null);
+    for (const column of this.columns) parsedTable[column.colNameStr] = [];
+    const appendRow = (record: Uint8Array) => {
+      try {
+        const values = this.parseRow(record);
+        for (const [index, column] of this.columns.entries()) {
+          parsedTable[column.colNameStr]!.push(values[index]);
         }
-        relativeRecordMetadata.relativeMetadataEnd += metadataStart;
-      } else {
-        this.warn("WARN_DB_RECORD_METADATA_MISMATCH", "Record metadata mismatch", {
-          expectedColumns: this.tableHeader.variableColumns,
-          parsedColumns: relativeRecordMetadata.variableLengthFieldCount,
+      } catch (error) {
+        this.warn("WARN_DB_ROW_SKIPPED_PARSE_ERROR", "Skipping row due parse error", {
+          message: error instanceof Error ? error.message : String(error),
         });
-        return;
       }
-    }
-    return relativeRecordMetadata;
-  }
-  private parseMemo(relativeObjData: Uint8Array, column: Column): string | number | boolean {
-    // console.log(`Parsing memo field ${relativeObjData}`);
-    const parsedMemo = MEMO.parse(
-      Buffer.from(relativeObjData.buffer, relativeObjData.byteOffset, relativeObjData.byteLength),
-    );
-    let memoData: Uint8Array;
-    let memoType: DataType;
-    if (parsedMemo.memoLength & 0x80000000) {
-      // console.log("Memo data inline");
-      memoData = relativeObjData.slice(parsedMemo.memoEnd);
-      memoType = DataType.Text;
-    } else if (parsedMemo.memoLength & 0x40000000) {
-      // console.log("LVAL type 1");
-      const tmp = this.getOverflowRecord(parsedMemo.recordPointer);
-      if (tmp === undefined) throw new Error("LVAL type 1 memoData is undefined");
-      memoData = tmp;
-      memoType = DataType.Text;
-    } else {
-      // console.log("LVAL type 2");
-      this.warn("WARN_DB_MEMO_LVAL2_UNSUPPORTED", "Memo LVAL type 2 currently not supported");
-      memoData = relativeObjData;
-      memoType = column.type;
-    }
-    return parseType(memoType, memoData, memoData.length, this.version);
-  }
-  private parseDynamicLengthData(
-    originalRecord: Uint8Array,
-    relativeRecordMetadata: ReturnType<typeof parseRelativeObjectMetadataStruct>,
-    relativeRecordsColumnMap: Dico<Column>,
-    nullTable: Array<boolean>,
-  ): void {
-    const relativeOffsets = relativeRecordMetadata.variableLengthFieldOffsets;
-    let jumpTableAddition = 0;
-    let i = -1;
-    for (const columnIndex of Object.keys(relativeRecordsColumnMap)) {
-      i += 1;
-      const column = relativeRecordsColumnMap[columnIndex]!;
-      const colName = column.colNameStr;
-
-      if (column.columnID < nullTable.length && nullTable[column.columnID] === false) {
-        if (this.parsedTable[colName] === undefined) {
-          this.parsedTable[colName] = [];
-        }
-        this.parsedTable[colName]!.push(null);
-        continue;
-      }
-
-      if (this.version === 3) {
-        if (relativeRecordMetadata.variableLengthJumpTable.includes(i))
-          jumpTableAddition = (jumpTableAddition + 0x100) >>> 0;
-      }
-      let relStart = relativeOffsets[i];
-      let relEnd: number;
-      if (i + 1 === relativeOffsets.length) relEnd = relativeRecordMetadata.varLenCount;
-      else relEnd = relativeOffsets[i + 1];
-      if (relStart === relEnd) {
-        if (this.parsedTable[colName] === undefined) this.parsedTable[colName] = [];
-        this.parsedTable[colName]!.push("");
-        continue;
-      }
-      const relativeObjData = originalRecord.slice(
-        relStart + jumpTableAddition,
-        relEnd + jumpTableAddition,
-      );
-      let parsedType: string | number | boolean;
-      if (column.type === DataType.Memo) {
-        try {
-          parsedType = this.parseMemo(relativeObjData, column);
-        } catch {
-          this.warn(
-            "WARN_DB_MEMO_FALLBACK_TO_BYTES",
-            "Failed to parse memo field. Using data as bytes",
-            { column: colName },
-          );
-          parsedType = new TextDecoder("utf-8").decode(relativeObjData);
-        }
-      } else {
-        parsedType = parseType(column.type, relativeObjData, relativeObjData.length, this.version);
-      }
-      if (this.parsedTable[colName] === undefined) this.parsedTable[colName] = [];
-      this.parsedTable[colName]!.push(parsedType);
-    }
-  }
-  private parseRow(record: Uint8Array): void {
-    const originalRecord = new Uint8Array(record);
-    let reverseRecord = new Uint8Array(record);
-    reverseRecord = reverseRecord.reverse();
-    const nullTableLen = Math.floor((this.tableHeader.columnCount + 7) / 8);
-    const nullTable: Array<boolean> = [];
-    if (nullTableLen && nullTableLen < originalRecord.length) {
-      const nullTableBuffer = record.slice(nullTableLen === 0 ? 0 : record.length - nullTableLen);
-      for (let i = 0; i < nullTableBuffer.length * 8; ++i)
-        nullTable.push((nullTableBuffer[Math.floor(i / 8)] & (((1 << (i % 8)) >>> 0) >>> 0)) !== 0);
-    } else {
-      throw new Error(`Failed to parse null table column count ${this.tableHeader.columnCount}`);
-    }
-    if (this.version > 3) record = record.slice(2);
-    else record = record.slice(1);
-    const relativeRecordsColumnMap: Dico<Column> = {};
-    for (const i of Object.keys(this.columns)) {
-      const column = this.columns[i]!;
-      if (!column.columnFlags.fixedLength) {
-        relativeRecordsColumnMap[i] = column;
-      }
-    }
-    const hasVariableLengthColumns = Object.keys(relativeRecordsColumnMap).length > 0;
-    const jet4Metadata =
-      this.version > 3 && hasVariableLengthColumns
-        ? this.parseDynamicLengthRecordsMetadata(reverseRecord, originalRecord, nullTableLen)
-        : undefined;
-    if (jet4Metadata) {
-      let variableColumnIndex = 0;
-      for (const columnIndex of Object.keys(relativeRecordsColumnMap)) {
-        const column = relativeRecordsColumnMap[columnIndex]!;
-        const valueIsPresent =
-          column.columnID >= nullTable.length || nullTable[column.columnID] !== false;
-        if (
-          valueIsPresent &&
-          variableColumnIndex >= jet4Metadata.variableLengthFieldCount
-        ) {
-          throw new Error(
-            `Jet4 variable-length field ${column.colNameStr} has no record offset`,
-          );
-        }
-        variableColumnIndex += 1;
-      }
-    }
-    for (const i of Object.keys(this.columns)) {
-      const column = this.columns[i]!;
-      if (column.columnFlags.fixedLength) this.parseFixedLengthData(record, column, nullTable);
-    }
-    if (Object.keys(relativeRecordsColumnMap).length > 0) {
-      const metadata =
-        jet4Metadata ??
-        this.parseDynamicLengthRecordsMetadata(reverseRecord, originalRecord, nullTableLen);
-      if (metadata === undefined) return;
-      this.parseDynamicLengthData(originalRecord, metadata, relativeRecordsColumnMap, nullTable);
-    }
-  }
-  public parse(): Dico<Array<string | number | boolean | null>> {
-    if (!this.table.linkedPages) return this.createEmptyTable();
+    };
     for (const dataChunk of this.table.linkedPages) {
       const originalData = dataChunk;
       const parsedData = parseDataPageHeader(originalData, this.version);
@@ -513,33 +404,17 @@ export class AccessTable {
           );
           const overflowRecPtr = dataView.getUint32(0, true);
           const record = this.getOverflowRecord(overflowRecPtr);
-          if (record !== undefined) {
-            try {
-              this.parseRow(record);
-            } catch (error) {
-              this.warn("WARN_DB_ROW_SKIPPED_PARSE_ERROR", "Skipping row due parse error", {
-                message: error instanceof Error ? error.message : String(error),
-              });
-            }
-          }
+          if (record !== undefined) appendRow(record);
           continue;
         }
         let record: Uint8Array;
         if (!lastOffset) record = originalData.slice(recOffset);
         else record = originalData.slice(recOffset, lastOffset);
         lastOffset = recOffset;
-        if (record) {
-          try {
-            this.parseRow(record);
-          } catch (error) {
-            this.warn("WARN_DB_ROW_SKIPPED_PARSE_ERROR", "Skipping row due parse error", {
-              message: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
+        appendRow(record);
       }
     }
     this.emitWarningsSummary();
-    return this.parsedTable;
+    return parsedTable;
   }
 }

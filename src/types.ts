@@ -1,4 +1,5 @@
 export type Version = 3 | 4 | 5 | 2010;
+export type AccessValue = string | number | boolean | Uint8Array | null;
 
 export interface Dico<T> {
   [i: number]: T | undefined;
@@ -11,7 +12,9 @@ export type AccessParserWarningCode =
   | "WARN_DB_OVERFLOW_FLAG_MISSING"
   | "WARN_DB_RECORD_METADATA_MISMATCH"
   | "WARN_DB_MEMO_LVAL2_UNSUPPORTED"
+  | "WARN_DB_LONG_VALUE_TRUNCATED"
   | "WARN_DB_MEMO_FALLBACK_TO_BYTES"
+  | "WARN_DB_NUMERIC_INVALID_LENGTH"
   | "WARN_DB_ROW_SKIPPED_PARSE_ERROR";
 
 export interface AccessParserWarning {
@@ -33,4 +36,5 @@ export interface AccessParserOptions {
   logLevel?: AccessParserLogLevel;
   onWarning?: (warning: AccessParserWarning) => void;
   onError?: (error: AccessParserError) => void;
+  formatMoney?: boolean;
 }

@@ -8,9 +8,6 @@ type ParserWithSaveOffset = Parser & {
 const withSaveOffset = (parser: any): ParserWithSaveOffset =>
   parser as unknown as ParserWithSaveOffset;
 
-const toBuffer = (buffer: Uint8Array): Buffer =>
-  Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-
 Parser.prototype.array = ((oldArray) =>
   function (this: any, varName: any, options: any) {
     if (options.length === 0) return this.setNextParser("array", varName, options);
@@ -96,7 +93,7 @@ export const parseTableHead = (buffer: Uint8Array, version: Version = 3): any =>
     .uint32le("freeSpacePageMap")
   )
     .saveOffset("tDefHeaderEnd")
-    .parse(toBuffer(buffer));
+    .parse(buffer);
 
 export const parseTableData = (
   buffer: Uint8Array,
@@ -128,6 +125,11 @@ export const parseTableData = (
     .uint8("numOfDecimalDigits")
     .uint16le("variousDec4Unknown");
   const VARIOUS_DEC = version === 3 ? VARIOUS_DEC_V3 : VARIOUS_DEC_V4;
+  const VARIOUS_NUMERIC = new Parser()
+    .seek(version === 3 ? 4 : 0)
+    .uint8("precision")
+    .uint8("scale")
+    .seek(version === 3 ? 0 : 2);
   const COLUMN = new Parser()
     .uint8("type")
     .uint32le("ver4Unknown3")
@@ -150,6 +152,7 @@ export const parseTableData = (
         10: VARIOUS_TEXT,
         11: VARIOUS_TEXT,
         12: VARIOUS_TEXT,
+        16: VARIOUS_NUMERIC,
       },
       defaultChoice: new Parser().seek(version === 3 ? 6 : 4),
     })
@@ -174,7 +177,7 @@ export const parseTableData = (
   });
   const COLUMN_NAMES: typeof COLUMN_NAMES_V3 =
     version === 3 ? COLUMN_NAMES_V3 : (COLUMN_NAMES_V4 as any);
-  const res = new Parser()
+  const parser = new Parser()
     .array("readIndex", {
       length: realIndexCount,
       type: REAL_INDEX,
@@ -186,8 +189,8 @@ export const parseTableData = (
     .array("columnNames", {
       length: columnCount,
       type: COLUMN_NAMES,
-    })
-    .parse(toBuffer(buffer));
+    });
+  const res = withSaveOffset(parser).saveOffset("columnMetadataEnd").parse(buffer);
   if (version !== 3) {
     for (const columnName of res.columnNames) {
       const rawValue = columnName.colNameStr;
@@ -198,6 +201,39 @@ export const parseTableData = (
   }
   return res;
 };
+
+/** Physical index definitions precede the logical indexes in the table definition. */
+export function readPrimaryKeyColumnIds(
+  bytes: Uint8Array,
+  indexCount: number,
+  realIndexCount: number,
+  version: Version,
+): number[] {
+  if (indexCount === 0) return [];
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const prefix = version === 3 ? 0 : 4;
+  const physicalIndexSize = version === 3 ? 39 : 52;
+  const logicalIndexSize = version === 3 ? 20 : 28;
+  const logicalIndexesStart = realIndexCount * physicalIndexSize;
+  if (logicalIndexesStart + indexCount * logicalIndexSize > bytes.length) {
+    throw new Error("Truncated Access index definitions");
+  }
+
+  for (let index = 0; index < indexCount; index += 1) {
+    const start = logicalIndexesStart + index * logicalIndexSize + prefix;
+    if (view.getUint8(start + 19) !== 1) continue;
+    const physicalIndex = view.getUint32(start + 4, true);
+    if (physicalIndex >= realIndexCount) throw new Error("Invalid Access primary key index");
+    const columnsStart = physicalIndex * physicalIndexSize + prefix;
+    const columns: number[] = [];
+    for (let column = 0; column < 10; column += 1) {
+      const id = view.getUint16(columnsStart + column * 3, true);
+      if (id !== 0xffff) columns.push(id);
+    }
+    return columns;
+  }
+  return [];
+}
 
 export const parseDataPageHeader = (buffer: Uint8Array, version: Version = 3) =>
   new Parser()
@@ -211,7 +247,7 @@ export const parseDataPageHeader = (buffer: Uint8Array, version: Version = 3) =>
       length: "recordCount",
       type: "uint16le",
     })
-    .parse(toBuffer(buffer));
+    .parse(buffer);
 
 export const parseRelativeObjectMetadataStruct = (
   buffer: Uint8Array,
@@ -236,28 +272,28 @@ export const parseRelativeObjectMetadataStruct = (
       .uint8("varLenCount")
     )
       .saveOffset("relativeMetadataEnd")
-      .parse(toBuffer(buffer));
+      .parse(buffer);
   } else {
     const part1: any = withSaveOffset(
       new Parser()
-      .uint16le("variableLengthFieldCount")
+      .uint16be("variableLengthFieldCount")
       .array("variableLengthJumpTable", {
         length: variableJumpTablesCNT,
         type: "uint8",
       })
     )
       .saveOffset("part2StartOffset")
-      .parse(toBuffer(buffer));
+      .parse(buffer);
     const part2 = withSaveOffset(
       new Parser()
       .array("variableLengthFieldOffsets", {
-        length: (part1.variableLengthFieldCount & 0xff) >>> 0,
-        type: "uint16le",
+        length: part1.variableLengthFieldCount,
+        type: "uint16be",
       })
-      .uint16le("varLenCount")
+      .uint16be("varLenCount")
     )
       .saveOffset("relativeMetadataEnd")
-      .parse(toBuffer(buffer.slice(part1.part2StartOffset)));
+      .parse(buffer.subarray(part1.part2StartOffset));
     const result = { ...part1, ...part2 };
     return result;
   }
